@@ -58,16 +58,29 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rewrite_adapter": "",
     "rewrite_review": True,
     "tts_enabled": False,
-    "tts_provider": "cosyvoice",
-    "tts_url": "http://127.0.0.1:50000",
-    "tts_voice": "中文女",
+    "tts_provider": "confucius4",
+    "tts_url": "http://127.0.0.1:7860",
+    "tts_voice": "speaker1",
+    "tts_lang": "zh",
     "tts_speed": 1.0,
     "tts_volume": 1.0,
     "tts_text_mode": "dialogue_or_action",
+    "tts_fallback_local": True,
+    "tts_subprocess": False,
+    "tts_confucius_dir": "",
+    "tts_confucius_python": "",
     "serial_mode": True,
 }
 
-BOOL_SETTINGS = ("demo_mode", "rewrite_enabled", "rewrite_review", "tts_enabled", "serial_mode")
+BOOL_SETTINGS = (
+    "demo_mode",
+    "rewrite_enabled",
+    "rewrite_review",
+    "tts_enabled",
+    "tts_fallback_local",
+    "tts_subprocess",
+    "serial_mode",
+)
 
 
 def _as_bool(value: Any) -> bool:
@@ -141,10 +154,13 @@ class Store:
             current["mock_llm"] = "auto"
         if current.get("rewrite_variant") not in REWRITE_VARIANTS:
             current["rewrite_variant"] = "8b"
+        if current.get("tts_provider") in {"clone", ""}:
+            current["tts_provider"] = "confucius4"
         if current.get("tts_provider") not in TTS_PROVIDERS:
-            current["tts_provider"] = "cosyvoice"
+            current["tts_provider"] = "confucius4"
         if current.get("tts_text_mode") not in {"dialogue", "dialogue_or_action"}:
             current["tts_text_mode"] = "dialogue_or_action"
+        current["tts_lang"] = str(current.get("tts_lang") or "zh").strip() or "zh"
         current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
         current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
         for key in BOOL_SETTINGS:
@@ -160,14 +176,19 @@ class Store:
             current[key] = _as_bool(current.get(key))
         if current.get("rewrite_variant") not in REWRITE_VARIANTS:
             current["rewrite_variant"] = "8b"
+        if current.get("tts_provider") in {"clone", ""}:
+            current["tts_provider"] = "confucius4"
         if current.get("tts_provider") not in TTS_PROVIDERS:
-            current["tts_provider"] = "cosyvoice"
+            current["tts_provider"] = "confucius4"
         if current.get("tts_text_mode") not in {"dialogue", "dialogue_or_action"}:
             current["tts_text_mode"] = "dialogue_or_action"
         current["rewrite_model"] = str(current.get("rewrite_model") or "").strip()
         current["rewrite_adapter"] = str(current.get("rewrite_adapter") or "").strip()
-        current["tts_voice"] = str(current.get("tts_voice") or "").strip() or "中文女"
-        current["tts_url"] = str(current.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
+        current["tts_voice"] = str(current.get("tts_voice") or "").strip() or "speaker1"
+        current["tts_lang"] = str(current.get("tts_lang") or "zh").strip() or "zh"
+        current["tts_url"] = str(current.get("tts_url") or "http://127.0.0.1:7860").rstrip("/")
+        current["tts_confucius_dir"] = str(current.get("tts_confucius_dir") or "").strip()
+        current["tts_confucius_python"] = str(current.get("tts_confucius_python") or "").strip()
         current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
         current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
         current["ollama_url"] = str(current["ollama_url"]).rstrip("/")

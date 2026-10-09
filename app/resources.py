@@ -66,6 +66,7 @@ class ResourceGate:
         self._queue: list[Ticket] = []
         self._last_family: str | None = None
         self.last_unload_notes: list[str] = []
+        self.confucius_status: dict[str, Any] | None = None
         self._seq = 0
         self._listeners: list[NotifyFn] = []
 
@@ -119,6 +120,7 @@ class ResourceGate:
             ],
             "last_family": self._last_family,
             "last_family_label": FAMILY_LABELS.get(self._last_family or "", "") if self._last_family else "",
+            "confucius": getattr(self, "confucius_status", None),
         }
 
     @asynccontextmanager

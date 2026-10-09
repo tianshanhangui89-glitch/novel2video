@@ -82,8 +82,14 @@ async def _rewriter(settings: dict, comfy_ok: bool) -> dict:
 
 
 async def _tts(settings: dict) -> dict:
-    info = provider_info(settings.get("tts_provider"))
-    if info.cloning:
-        return {"ok": False, "detail": info.note}
     provider = get_provider(settings.get("tts_provider"))
-    return await provider.health(settings)
+    status = await provider.health(settings)
+    if status.get("ok"):
+        return status
+    if settings.get("tts_fallback_local") and (settings.get("tts_provider") or "") != "local":
+        return {
+            "ok": False,
+            "detail": (status.get("detail") or "配音服务不可用")
+            + "。已开启本地回退：合成失败时会改用本地占位音。",
+        }
+    return status

@@ -2,17 +2,13 @@
 
 Providers
 ---------
-* ``cosyvoice`` — local CosyVoice HTTP server, **preset speakers only**
-  (``POST /inference_sft`` with ``tts_text`` + ``spk_id``). Default URL
-  ``http://127.0.0.1:50000``.
-* ``local`` — offline fallback that needs no extra install. Prefer
-  ``espeak-ng`` / ``espeak`` when on ``PATH``; otherwise write a soft
-  speech-shaped placeholder WAV sized by character count so alignment
-  and the mix still run.
-* ``clone`` — **stub only**. Voice cloning is not implemented. When it
-  is added later it must use only the user's own voice or a voice they
-  have explicit authorization to use. Do not wire zero-shot / reference
-  audio paths here.
+* ``confucius4`` — **default**. User's local Confucius4-TTS ``server_local.py``
+  (Transformers backend). Preset speakers ``speaker1`` / ``speaker2``, or a
+  per-character reference WAV for zero-shot cloning. Cloning requires an
+  explicit authorization checkbox at upload time; no celebrity voices ship
+  with this app.
+* ``cosyvoice`` — CosyVoice FastAPI, preset speakers only (kept as optional).
+* ``local`` — offline fallback (espeak if present, else timed placeholder).
 
 Demo mode never calls a provider: the pipeline writes a short chirp WAV
 itself (see ``app.demo_media.write_speech``).
@@ -33,9 +29,10 @@ from typing import Any, Protocol
 
 import httpx
 
+from app import confucius
+
 SAMPLE_RATE = 22050
 
-# CosyVoice-300M-SFT preset speakers commonly shipped with the official server.
 COSY_PRESETS = (
     "中文女",
     "中文男",
@@ -73,6 +70,7 @@ class ProviderInfo:
     needs_url: bool
     voices: tuple[VoiceInfo, ...]
     cloning: bool = False
+    needs_confucius_dir: bool = False
 
 
 class TTSProvider(Protocol):
@@ -88,41 +86,48 @@ class TTSProvider(Protocol):
         voice: str,
         speed: float,
         settings: dict,
+        reference: Path | None = None,
+        lang: str = "zh",
     ) -> float:
         """Write WAV to ``dest`` and return duration in seconds."""
 
 
 PROVIDERS: dict[str, ProviderInfo] = {
+    "confucius4": ProviderInfo(
+        id="confucius4",
+        label="Confucius4-TTS（本地，默认）",
+        note=(
+            "连本机 Confucius4-TTS 的 server_local.py（Transformers，不要用官方 vLLM server.py）。"
+            "默认 http://127.0.0.1:7860。可用 speaker1 / speaker2 预设，或为角色上传已授权的参考 wav 做零样本克隆。"
+            "超过 1024 字会自动分句后拼接。"
+        ),
+        needs_url=True,
+        voices=(
+            VoiceInfo("speaker1", "speaker1（默认中文女）"),
+            VoiceInfo("speaker2", "speaker2"),
+        ),
+        cloning=True,
+        needs_confucius_dir=True,
+    ),
     "cosyvoice": ProviderInfo(
         id="cosyvoice",
         label="CosyVoice（本地预设音色）",
-        note="连本机 CosyVoice FastAPI。只用预训练音色（中文女 / 中文男 等），不走克隆。默认 http://127.0.0.1:50000。",
+        note="可选。连本机 CosyVoice FastAPI，只用预训练音色，不走克隆。默认地址请改成 http://127.0.0.1:50000。",
         needs_url=True,
         voices=tuple(VoiceInfo(v, v) for v in COSY_PRESETS),
     ),
     "local": ProviderInfo(
         id="local",
         label="本地占位（免安装）",
-        note="不需要 GPU。有 espeak-ng / espeak 就用它；否则生成按时长估算的占位音，用来走通对齐和混音。",
+        note="不需要 GPU。有 espeak-ng / espeak 就用它；否则生成按时长估算的占位音。Confucius4 不可用且开启回退时也会用到。",
         needs_url=False,
         voices=tuple(VoiceInfo(v, v) for v in ESPEAK_VOICES),
-    ),
-    "clone": ProviderInfo(
-        id="clone",
-        label="声音克隆（未实现）",
-        note=(
-            "预留接口。将来只会支持用户本人的声音，或用户明确授权的声音；"
-            "不会在未授权情况下复刻他人音色。当前选择此项会报错。"
-        ),
-        needs_url=False,
-        voices=(),
-        cloning=True,
     ),
 }
 
 
 def provider_info(key: str | None) -> ProviderInfo:
-    return PROVIDERS.get(key or "cosyvoice") or PROVIDERS["cosyvoice"]
+    return PROVIDERS.get(key or "confucius4") or PROVIDERS["confucius4"]
 
 
 def list_providers() -> list[dict[str, Any]]:
@@ -133,6 +138,7 @@ def list_providers() -> list[dict[str, Any]]:
             "note": item.note,
             "needs_url": item.needs_url,
             "cloning": item.cloning,
+            "needs_confucius_dir": item.needs_confucius_dir,
             "voices": [{"id": v.id, "label": v.label} for v in item.voices],
         }
         for item in PROVIDERS.values()
@@ -149,15 +155,12 @@ def speakable_text(shot: dict, mode: str = "dialogue_or_action") -> str:
     action = (shot.get("action") or "").strip()
     if not action:
         return ""
-    # Keep narration short so placeholder / CosyVoice stays within the shot.
     clipped = action if len(action) <= 48 else action[:47].rstrip("，,。.") + "…"
     return clipped
 
 
 def estimate_duration(text: str, speed: float = 1.0) -> float:
-    """Rough spoken length used by the placeholder path and demo mode."""
     chars = max(1, len(re.sub(r"\s+", "", text or "")))
-    # ~4 Chinese chars/sec at speed 1.0; clamp so a one-liner still has body.
     seconds = chars / max(0.5, 4.0 * max(0.5, min(2.0, float(speed))))
     return max(0.6, min(20.0, seconds + 0.25))
 
@@ -170,7 +173,6 @@ def wav_duration(path: Path) -> float:
 
 
 def write_placeholder_wav(dest: Path, seconds: float, *, seed: int = 0) -> float:
-    """Soft amplitude-modulated tone — not speech, but enough for mix/align tests."""
     seconds = max(0.4, min(float(seconds), 30.0))
     n = int(SAMPLE_RATE * seconds)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +181,6 @@ def write_placeholder_wav(dest: Path, seconds: float, *, seed: int = 0) -> float
     for i in range(n):
         t = i / SAMPLE_RATE
         env = 0.22 * (0.55 + 0.45 * math.sin(2 * math.pi * (3.2 + (seed % 5) * 0.35) * t))
-        # Brief syllable-like gaps every ~0.28s so it is audibly "spoken-ish".
         if (i % int(SAMPLE_RATE * 0.28)) > int(SAMPLE_RATE * 0.22):
             sample = 0
         else:
@@ -194,19 +195,107 @@ def write_placeholder_wav(dest: Path, seconds: float, *, seed: int = 0) -> float
 
 
 def get_provider(key: str | None) -> TTSProvider:
-    name = key or "cosyvoice"
+    name = key or "confucius4"
     if name == "local":
         return LocalFallbackProvider()
+    if name == "cosyvoice":
+        return CosyVoiceProvider()
     if name == "clone":
-        return VoiceCloneStub()
-    return CosyVoiceProvider()
+        # Legacy settings value → Confucius4 (authorized cloning lives there).
+        return Confucius4Provider()
+    return Confucius4Provider()
+
+
+class Confucius4Provider:
+    info = PROVIDERS["confucius4"]
+
+    async def release(self, settings: dict) -> str:
+        if settings.get("tts_subprocess"):
+            return await confucius.MANAGER.stop()
+        return (
+            "Confucius4 HTTP 模式无卸载接口。配音结束后可手动停止 "
+            "`server_local.py`（Ctrl+C）以释放 4090 显存；"
+            "或在设置里改用「按需启动子进程」，由本程序在 TTS 阶段结束后自动结束进程。"
+        )
+
+    async def health(self, settings: dict) -> dict:
+        status = await confucius.health(settings)
+        if status["ok"]:
+            return status
+        if settings.get("tts_subprocess") and confucius.confucius_dir(settings):
+            return {
+                "ok": False,
+                "detail": status["detail"] + "。已开启子进程模式：配音阶段会尝试自动启动 server_local.py",
+                "url": status.get("url"),
+            }
+        return status
+
+    async def synthesize(
+        self,
+        text: str,
+        dest: Path,
+        *,
+        voice: str,
+        speed: float,
+        settings: dict,
+        reference: Path | None = None,
+        lang: str = "zh",
+    ) -> float:
+        # Ensure UTF-8 text (Chinese) — httpx sends unicode; encode check for safety.
+        text = str(text or "").encode("utf-8").decode("utf-8").strip()
+        if not text:
+            raise TTSError("配音文本是空的")
+        lang = (lang or settings.get("tts_lang") or "zh").strip() or "zh"
+        try:
+            await confucius.MANAGER.ensure(settings)
+        except confucius.ConfuciusError as exc:
+            raise TTSError(str(exc)) from exc
+
+        ref = reference
+        if ref is None:
+            preset = (voice or settings.get("tts_voice") or "speaker1").strip() or "speaker1"
+            if preset in {"speaker1", "speaker2"}:
+                # speaker1 may omit reference (server default); speaker2 needs the file when available.
+                found = confucius.resolve_preset_wav(settings, preset)
+                if found is not None:
+                    ref = found
+                elif preset == "speaker2":
+                    raise TTSError(
+                        "找不到 speaker2 参考音频。请在设置里填写 Confucius4 目录，"
+                        "或为角色上传已授权的参考 wav。"
+                    )
+                # speaker1 with no local file → omit reference, server uses its default.
+
+        chunks = confucius.chunk_text(text, confucius.MAX_CHARS)
+        if not chunks:
+            raise TTSError("切段后没有可合成的文本")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part_paths: list[Path] = []
+        try:
+            for index, chunk in enumerate(chunks):
+                part = dest.with_name(f"{dest.stem}_p{index:02d}.wav")
+                await confucius.synthesize_http(
+                    settings,
+                    chunk,
+                    part,
+                    lang=lang,
+                    reference=ref,
+                )
+                part_paths.append(part)
+            if len(part_paths) == 1:
+                part_paths[0].replace(dest)
+                return wav_duration(dest)
+            return await asyncio.to_thread(confucius.concat_wavs, part_paths, dest)
+        finally:
+            for part in part_paths:
+                if part != dest and part.is_file():
+                    part.unlink(missing_ok=True)
 
 
 class CosyVoiceProvider:
     info = PROVIDERS["cosyvoice"]
 
     async def release(self, settings: dict) -> str:
-        """Best-effort unload. Official CosyVoice FastAPI has no standard free route."""
         url = (settings.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
         for path in ("/unload", "/free", "/api/unload"):
             try:
@@ -222,8 +311,6 @@ class CosyVoiceProvider:
         url = (settings.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
-                # Official server has no dedicated health route; any response short of a
-                # connection error means the process is up.
                 response = await client.get(url + "/docs")
                 if response.status_code >= 500:
                     return {"ok": False, "detail": f"CosyVoice 返回 {response.status_code}"}
@@ -231,20 +318,27 @@ class CosyVoiceProvider:
         except httpx.HTTPError as exc:
             return {"ok": False, "detail": f"连不上 CosyVoice（{url}）：{exc}"}
 
-    async def synthesize(self, text: str, dest: Path, *, voice: str, speed: float, settings: dict) -> float:
+    async def synthesize(
+        self,
+        text: str,
+        dest: Path,
+        *,
+        voice: str,
+        speed: float,
+        settings: dict,
+        reference: Path | None = None,
+        lang: str = "zh",
+    ) -> float:
+        del reference, lang  # CosyVoice path is preset-only.
         url = (settings.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
         spk = (voice or "中文女").strip() or "中文女"
         speed = max(0.5, min(2.0, float(speed or 1.0)))
         dest.parent.mkdir(parents=True, exist_ok=True)
-        data = {"tts_text": text, "spk_id": spk}
-        # Official runtime_fastapi.py accepts form fields; speed is supported by the
-        # inference API even when the thin HTTP wrapper ignores unknown keys.
-        data["speed"] = str(speed)
+        data = {"tts_text": text, "spk_id": spk, "speed": str(speed)}
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 response = await client.post(url + "/inference_sft", data=data)
                 if response.status_code >= 400:
-                    # Some forks expose JSON /inference instead.
                     response = await client.post(
                         url + "/inference",
                         json={"mode": "sft", "tts_text": text, "spk_id": spk, "speed": speed, "stream": False},
@@ -256,11 +350,9 @@ class CosyVoiceProvider:
         if len(body) < 64:
             raise TTSError("CosyVoice 返回的音频是空的")
         dest.write_bytes(body)
-        # CosyVoice streams raw PCM/WAV; probe with wave, fall back to ffprobe via duration estimate.
         try:
             return wav_duration(dest)
         except wave.Error:
-            # Non-WAV container (e.g. bare PCM). Re-wrap as WAV via ffmpeg if needed.
             from app.stitch import ffmpeg_bin, probe_duration, _run
 
             wrapped = dest.with_suffix(".wrap.wav")
@@ -290,7 +382,18 @@ class LocalFallbackProvider:
             "detail": "未找到 espeak-ng，将生成按时长估算的占位音（免安装，可走通对齐和混音）",
         }
 
-    async def synthesize(self, text: str, dest: Path, *, voice: str, speed: float, settings: dict) -> float:
+    async def synthesize(
+        self,
+        text: str,
+        dest: Path,
+        *,
+        voice: str,
+        speed: float,
+        settings: dict,
+        reference: Path | None = None,
+        lang: str = "zh",
+    ) -> float:
+        del reference, lang
         binary = self._espeak()
         speed = max(0.5, min(2.0, float(speed or 1.0)))
         if binary:
@@ -300,7 +403,6 @@ class LocalFallbackProvider:
 
     def _espeak_synth(self, binary: str, text: str, dest: Path, voice: str, speed: float) -> float:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # espeak -s is words-per-minute; 175 ≈ 1.0x for Chinese.
         wpm = max(80, min(350, int(175 * speed)))
         voice = (voice or "zh").strip() or "zh"
         wav = dest.with_suffix(".espeak.wav")
@@ -308,33 +410,8 @@ class LocalFallbackProvider:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0 or not wav.is_file():
             raise TTSError((result.stderr or result.stdout or "espeak 失败").strip()[:240])
-        # Normalize sample rate for the mixer.
         from app.stitch import ffmpeg_bin, probe_duration, _run
 
         _run([ffmpeg_bin(), "-y", "-i", str(wav), "-ar", str(SAMPLE_RATE), "-ac", "1", str(dest)])
         wav.unlink(missing_ok=True)
         return probe_duration(dest)
-
-
-class VoiceCloneStub:
-    """Future home for authorized voice cloning. Not wired to any zero-shot path yet."""
-
-    info = PROVIDERS["clone"]
-
-    async def release(self, settings: dict) -> str:
-        return "声音克隆未实现，无需卸载"
-
-    async def health(self, settings: dict) -> dict:
-        return {
-            "ok": False,
-            "detail": (
-                "声音克隆尚未实现。上线后只会接受用户本人的参考音，"
-                "或用户明确授权的声音；当前请改用 CosyVoice 预设音色或本地占位。"
-            ),
-        }
-
-    async def synthesize(self, text: str, dest: Path, *, voice: str, speed: float, settings: dict) -> float:
-        raise TTSError(
-            "声音克隆尚未实现（预留接口）。请改用 CosyVoice 预设音色或本地占位。"
-            "将来只会支持用户本人的声音，或用户明确授权的声音。"
-        )

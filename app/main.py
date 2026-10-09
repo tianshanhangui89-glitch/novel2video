@@ -9,7 +9,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -47,9 +47,14 @@ class SettingsIn(BaseModel):
     tts_provider: str | None = None
     tts_url: str | None = None
     tts_voice: str | None = None
+    tts_lang: str | None = None
     tts_speed: float | None = None
     tts_volume: float | None = None
     tts_text_mode: str | None = None
+    tts_fallback_local: bool | None = None
+    tts_subprocess: bool | None = None
+    tts_confucius_dir: str | None = None
+    tts_confucius_python: str | None = None
     serial_mode: bool | None = None
 
 
@@ -96,8 +101,15 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/resources")
     async def resources():
+        from app import confucius
+
+        settings = store.load_settings()
         snap = engine.resources()
-        snap["serial_mode"] = store.load_settings().get("serial_mode", True)
+        snap["serial_mode"] = settings.get("serial_mode", True)
+        if settings.get("tts_provider", "confucius4") in {"confucius4", "clone"} or settings.get("tts_enabled"):
+            status = await confucius.health(settings)
+            GATE.confucius_status = status
+            snap["confucius"] = status
         return snap
 
     @app.get("/api/settings")
@@ -183,6 +195,71 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
         project["style"] = project["storyboard"]["style"]
         project["aspect"] = project["storyboard"]["aspect"]
         return store.save_project(project)
+
+    @app.post("/api/projects/{project_id}/voices")
+    async def upload_voice(
+        project_id: str,
+        character_id: str = Form(...),
+        authorized: str = Form("false"),
+        file: UploadFile = File(...),
+    ):
+        """Upload a reference WAV for zero-shot cloning. Requires authorization attestation."""
+        try:
+            project = store.load_project(project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "没有找到这个项目") from None
+        if not _as_truthy(authorized):
+            raise HTTPException(
+                400,
+                "必须勾选「我确认拥有该声音的使用授权」。只接受你本人的声音，或你已获得明确授权的声音；不得上传名人或未授权他人音色。",
+            )
+        if not project.get("storyboard"):
+            raise HTTPException(400, "请先生成分镜")
+        name = (file.filename or "voice.wav").lower()
+        if not name.endswith((".wav", ".wave")):
+            raise HTTPException(400, "请上传 wav 格式的参考音频")
+        data = await file.read()
+        if len(data) < 1000:
+            raise HTTPException(400, "参考音频太短或文件损坏")
+        if len(data) > 20 * 1024 * 1024:
+            raise HTTPException(400, "参考音频请小于 20 MB")
+        safe_id = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in character_id)[:64] or "voice"
+        rel = f"voices/{safe_id}.wav"
+        dest = store.media_dir(project_id) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        found = False
+        for character in project["storyboard"].get("characters") or []:
+            if character.get("id") == character_id:
+                character["voice_ref"] = rel
+                character["voice_ref_authorized"] = True
+                found = True
+                break
+        if not found:
+            raise HTTPException(400, f"分镜里没有角色 {character_id}")
+        store.save_project(project)
+        return {"ok": True, "character_id": character_id, "voice_ref": rel, "project": project}
+
+    @app.delete("/api/projects/{project_id}/voices/{character_id}")
+    async def clear_voice(project_id: str, character_id: str):
+        try:
+            project = store.load_project(project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "没有找到这个项目") from None
+        board = project.get("storyboard") or {}
+        for character in board.get("characters") or []:
+            if character.get("id") != character_id:
+                continue
+            rel = character.get("voice_ref") or ""
+            if rel:
+                path = store.media_dir(project_id) / rel
+                if path.is_file():
+                    path.unlink()
+            character["voice_ref"] = ""
+            character["voice_ref_authorized"] = False
+            store.save_project(project)
+            return {"ok": True, "project": project}
+        raise HTTPException(404, "没有找到这个角色")
 
     @app.post("/api/projects/{project_id}/run")
     async def run_project(project_id: str, body: RunIn | None = None):
@@ -270,6 +347,12 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _as_truthy(value: str | bool | None) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 app = build_app()

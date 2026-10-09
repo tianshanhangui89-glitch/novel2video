@@ -234,20 +234,64 @@ python scripts/stage1_llm_storyboard.py \
 1. 文本：优先用镜头 **对白**；没有对白时可用 **动作** 作短旁白（设置里可改成「只读对白」）。
 2. 对齐：若配音比视频长，用 FFmpeg 冻结尾帧把视频垫到配音时长，并更新 `duration_sec`；配音较短则在混音时补静音。
 3. 混音：阶段 5 把每镜 WAV 按设置的音量叠进对应镜头，再 concat 成片。
+4. 超过 **1024 字** 会按句切段，分别请求后再拼接。
+
+### 默认后端：Confucius4-TTS
+
+本机（Windows + RTX 4090）推荐用你已装好的 **Confucius4-TTS**（Transformers 后端，**不要**用官方 vLLM `server.py`）。
+
+在 Confucius4 目录、已激活的 Python 3.10 venv 里启动本地 HTTP 服务：
+
+```bash
+cd "D:\WorkSection\AI Git projects\Confucius4-TTS"
+.\.venv\Scripts\activate
+python server_local.py --host 127.0.0.1 --port 7860
+```
+
+接口约定：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | `{ok, sample_rate, cuda}` |
+| POST | `/api/tts` | multipart：`text`、`lang`（默认 zh）、可选 `reference`（参考 wav）；返回 `audio/wav`（22050Hz） |
+
+默认参考音色是仓库内 `pretrained/campplus/examples/speaker1_a_cn_16k.wav`（另有 speaker2）。Novel2Video 设置里的服务地址默认 `http://127.0.0.1:7860`。
 
 **提供方（可插拔）**
 
 | id | 说明 |
 |----|------|
-| `cosyvoice` | 本机 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) FastAPI，**只用预训练音色**（中文女 / 中文男 / 英文女 / 英文男 / 日语男 / 粤语女）。默认地址 `http://127.0.0.1:50000`，调用 `POST /inference_sft`（`tts_text` + `spk_id`）。 |
-| `local` | 免安装回退。若 `PATH` 里有 `espeak-ng` / `espeak` 就用它；否则生成按时长估算的占位音，用来走通对齐和混音。 |
-| `clone` | **未实现的预留接口。** 将来只会支持用户本人的声音，或用户明确授权的声音；当前选它会报错，不会走任何 zero-shot / 参考音频路径。 |
+| `confucius4`（**默认**） | 本机 Confucius4 `server_local.py`。预设 `speaker1` / `speaker2`；也可为角色上传**已授权**的参考 wav 做零样本克隆。可选「按需启动子进程」：填写 Confucius4 目录与 venv Python，TTS 阶段自动启停以释放显存。 |
+| `cosyvoice` | 可选。CosyVoice FastAPI，只用预训练音色，不走克隆。地址请改成 `http://127.0.0.1:50000`。 |
+| `local` | 免安装回退。有 `espeak-ng` / `espeak` 就用它；否则生成占位音。Confucius4 不可用且开启「回退本地」时也会用到。 |
 
-设置项：启用开关、提供方、CosyVoice URL、音色、语速（0.5–2）、音量（0–2）、朗读文本模式。运行页每镜可播放配音；演示模式会写占位 WAV，不连 CosyVoice。
+**角色音色与授权**
+
+- 分镜确认页可为每个角色选预设音色，或上传参考 wav。
+- 上传时**必须勾选**「我确认拥有该声音的使用授权」（本人或已获授权）。未勾选会被拒绝。
+- **不内置任何真人名人音色。** 旁白用设置里的默认音色（默认 speaker1）。
+
+**配置项（设置页 / `data/settings.json`）**
+
+| 键 | 默认 | 含义 |
+|----|------|------|
+| `tts_enabled` | false | 是否跑阶段 4.5 |
+| `tts_provider` | `confucius4` | 提供方 |
+| `tts_url` | `http://127.0.0.1:7860` | Confucius4 / CosyVoice 地址 |
+| `tts_voice` | `speaker1` | 默认旁白 / 预设音色 |
+| `tts_lang` | `zh` | 语种 |
+| `tts_speed` / `tts_volume` | 1.0 | 语速、混音音量 |
+| `tts_text_mode` | `dialogue_or_action` | 对白优先或仅对白 |
+| `tts_fallback_local` | true | 主引擎失败时回退本地占位 |
+| `tts_subprocess` | false | 按需启动 `server_local.py`，TTS 结束后结束进程 |
+| `tts_confucius_dir` | `""` | Confucius4 根目录（子进程 / 解析 speaker 预设） |
+| `tts_confucius_python` | `""` | 可选；默认用目录下 `.venv` |
+
+低配串行开启时：进入 TTS 前会卸 Ollama / ComfyUI；TTS 结束后子进程模式会杀 `server_local`，HTTP 模式请自行 Ctrl+C 停服务以释放 4090 显存。`GET /api/resources` 会带上 Confucius4 `/health` 状态。
 
 **English**
 
-Optional stage 4.5. Prefer shot **dialogue**, else a short **action** narration. Audio longer than the clip pads the video (freeze last frame); staging mixes each WAV into the FFmpeg cut. Providers: **CosyVoice** preset speakers only (configurable API URL), **local** offline fallback (espeak if present, else timed placeholder), and a clearly marked **clone stub** that refuses to run and documents authorized-voice-only future use. Demo mode simulates speech offline.
+Default TTS backend is **Confucius4-TTS** via local `server_local.py` (not vLLM `server.py`), URL `http://127.0.0.1:7860`. Preset speakers `speaker1`/`speaker2`, or per-character authorized reference WAVs for zero-shot cloning (upload requires an authorization checkbox; no celebrity voices are bundled). Texts over 1024 chars are sentence-split and concatenated. CosyVoice presets remain optional. Offline `local` fallback is available. Optional subprocess mode starts/stops `server_local.py` around the TTS stage to free VRAM.
 
 ## 低配串行 / Low-resource serial mode
 
@@ -285,7 +329,7 @@ Optional stage 4.5. Prefer shot **dialogue**, else a short **action** narration.
 
 试 H3 提示词改写：设置里打开「H3 提示词改写」（演示模式下也能开），重新开拍示例章节。阶段 3 之后会停在「待确认提示词」，对照原文改一镜，再点「确认提示词并生成视频」。
 
-试配音：设置里打开「配音」，提供方选「本地占位」或 CosyVoice，保存后重跑。阶段 4.5 会出 WAV，镜头卡片可播放，成片里能听到混音。低配串行保持默认开启；同时开两个项目时，运行页能看到 GPU 占用和排队。
+试配音：先启动 Confucius4 的 `server_local.py`（或设置里开子进程模式并填目录），再打开「配音」，提供方保持 Confucius4，保存后重跑。阶段 4.5 会出 WAV；也可在分镜页为角色上传已授权参考音。低配串行保持默认开启。
 
 ## 目录
 

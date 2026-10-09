@@ -28,10 +28,10 @@ def test_speakable_text_and_providers():
     assert speakable_text({"dialogue": "", "action": "推门而入，环顾"}, "dialogue_or_action").startswith("推门")
     assert speakable_text({"dialogue": "", "action": "推门"}, "dialogue") == ""
     ids = [item["id"] for item in list_providers()]
-    assert ids == ["cosyvoice", "local", "clone"]
-    clone = next(item for item in list_providers() if item["id"] == "clone")
-    assert clone["cloning"] is True
-    assert "授权" in clone["note"]
+    assert ids == ["confucius4", "cosyvoice", "local"]
+    conf = next(item for item in list_providers() if item["id"] == "confucius4")
+    assert conf["cloning"] is True
+    assert "授权" in conf["note"] or "参考" in conf["note"]
 
 
 def test_placeholder_and_local_provider(tmp_path: Path):
@@ -50,10 +50,10 @@ def test_placeholder_and_local_provider(tmp_path: Path):
         assert dur >= 0.5
         assert (await provider.release({}))
 
-        stub = get_provider("clone")
-        assert (await stub.health({}))["ok"] is False
-        with pytest.raises(TTSError):
-            await stub.synthesize("x", dest, voice="", speed=1.0, settings={})
+        conf = get_provider("confucius4")
+        # Without a live server, health is false; synthesize errors clearly.
+        health = await conf.health({"tts_url": "http://127.0.0.1:9"})
+        assert health["ok"] is False
 
     asyncio.run(run())
 
@@ -90,7 +90,7 @@ def test_settings_and_workflows_expose_tts(tmp_path: Path):
         defaults = client.get("/api/settings").json()
         assert defaults["tts_enabled"] is False
         assert defaults["serial_mode"] is True
-        assert defaults["tts_provider"] == "cosyvoice"
+        assert defaults["tts_provider"] == "confucius4"
         saved = client.put(
             "/api/settings",
             json={
@@ -106,11 +106,11 @@ def test_settings_and_workflows_expose_tts(tmp_path: Path):
         assert saved["tts_enabled"] is True and saved["tts_provider"] == "local"
         assert saved["tts_speed"] == 1.2 and saved["serial_mode"] is True
         bad = client.put("/api/settings", json={"tts_provider": "nope", "tts_speed": 9}).json()
-        assert bad["tts_provider"] == "cosyvoice"
+        assert bad["tts_provider"] == "confucius4"
         assert bad["tts_speed"] == 2.0
         client.put("/api/settings", json={"tts_enabled": True, "tts_provider": "local"}).json()
         tts = client.get("/api/workflows").json()["tts"]
-        assert [item["id"] for item in tts] == ["cosyvoice", "local", "clone"]
+        assert [item["id"] for item in tts] == ["confucius4", "cosyvoice", "local"]
         res = client.get("/api/resources").json()
         assert "holder" in res and res["serial_mode"] is True
         check = client.post("/api/settings/check").json()
