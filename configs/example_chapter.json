@@ -1,0 +1,68 @@
+{
+  "project_id": "demo_ch01",
+  "title": "客栈夜雨",
+  "style": "anime cel-shading, consistent character design, cinematic lighting, soft rain atmosphere",
+  "aspect": "16:9",
+  "source": {
+    "type": "novel_chapter",
+    "path": "input/chapter01.md",
+    "language": "zh"
+  },
+  "characters": [
+    {
+      "id": "c_hero",
+      "name": "林远",
+      "appearance": "25岁东亚男性，短黑发，青灰色长袍，清瘦脸型，沉稳眼神",
+      "ref_prompt": "young east asian man, short black hair, slate-blue robe, slim face, calm eyes, full body and face turnaround",
+      "voice_note": "沉稳青年男声"
+    },
+    {
+      "id": "c_host",
+      "name": "掌柜",
+      "appearance": "50岁左右东亚男性，发髻，褐色短褂，眼角有纹，站在柜台后",
+      "ref_prompt": "middle-aged east asian innkeeper, hair in a topknot, brown short jacket, lined eyes, standing behind a wooden counter",
+      "voice_note": "低沉沙哑"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "s_inn",
+      "name": "客栈大堂",
+      "visual": "木质梁柱，暖黄油灯，窗外夜雨，地面反光，火塘边有旅客"
+    }
+  ],
+  "props": [
+    {
+      "id": "p_lamp",
+      "name": "油灯",
+      "visual": "黄铜油灯，暖黄色火苗，灯罩有烟熏痕迹",
+      "ref_prompt": "brass oil lamp with a warm flame, soot on the glass chimney, isolated on a dark background"
+    }
+  ],
+  "shots": [
+    {
+      "shot_id": "001",
+      "duration_sec": 5,
+      "scene_id": "s_inn",
+      "characters": ["c_hero"],
+      "camera": "中景，缓慢推近",
+      "action": "推门而入，看向梁下的油灯，再环顾四周",
+      "dialogue": "总算到了。",
+      "sfx": "木门吱呀，雨声",
+      "image_prompt": "anime cel-shading, young man in slate-blue robe pushing open a wooden inn door, warm oil lamps, rainy night outside, medium shot, cinematic lighting",
+      "motion_prompt": "slow push-in as the door opens, rain visible through doorway, character turns head to look around, natural cloth movement"
+    },
+    {
+      "shot_id": "002",
+      "duration_sec": 4,
+      "scene_id": "s_inn",
+      "characters": ["c_hero"],
+      "camera": "近景",
+      "action": "擦去肩上雨水，看向柜台",
+      "dialogue": "",
+      "sfx": "雨声渐弱",
+      "image_prompt": "close-up of young man in slate-blue robe wiping rain from his shoulder inside a wooden inn, warm lamp light, consistent face",
+      "motion_prompt": "subtle head turn toward the counter, hand wiping the shoulder, soft ambient motion"
+    }
+  ]
+}

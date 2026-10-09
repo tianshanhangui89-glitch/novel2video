@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/projects/
+data/settings.json
+output/
+agent-tools/
+uploads/

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Novel2VideoProject",
+  "type": "object",
+  "required": ["project_id", "title", "style", "aspect", "source"],
+  "properties": {
+    "project_id": { "type": "string" },
+    "title": { "type": "string" },
+    "style": { "type": "string" },
+    "aspect": { "type": "string", "enum": ["16:9", "9:16", "1:1"] },
+    "source": {
+      "type": "object",
+      "required": ["type", "path", "language"],
+      "properties": {
+        "type": { "type": "string" },
+        "path": { "type": "string" },
+        "language": { "type": "string" }
+      }
+    },
+    "characters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "appearance"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "appearance": { "type": "string" },
+          "ref_prompt": { "type": "string" },
+          "voice_note": { "type": "string" },
+          "ref_image": { "type": "string" }
+        }
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "visual"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "visual": { "type": "string" },
+          "ref_image": { "type": "string" }
+        }
+      }
+    },
+    "props": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "visual"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "visual": { "type": "string" },
+          "ref_prompt": { "type": "string" },
+          "ref_image": { "type": "string" }
+        }
+      }
+    },
+    "shots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["shot_id", "duration_sec", "camera", "action", "image_prompt", "motion_prompt"],
+        "properties": {
+          "shot_id": { "type": "string" },
+          "duration_sec": { "type": "number", "minimum": 2, "maximum": 15 },
+          "scene_id": { "type": "string" },
+          "characters": { "type": "array", "items": { "type": "string" } },
+          "camera": { "type": "string" },
+          "action": { "type": "string" },
+          "dialogue": { "type": "string" },
+          "sfx": { "type": "string" },
+          "image_prompt": { "type": "string" },
+          "motion_prompt": { "type": "string" },
+          "keyframe": { "type": "string" },
+          "video": { "type": "string" }
+        }
+      }
+    }
+  }
+}
