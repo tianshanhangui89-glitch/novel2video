@@ -28,10 +28,12 @@ from typing import Any, AsyncIterator, Callable
 
 import httpx
 
+from app import httputil
+
 log = logging.getLogger("novel2video.resources")
 
 FAMILY_LABELS = {
-    "llm": "Ollama 语言模型",
+    "llm": "语言模型",
     "image": "ComfyUI 出图",
     "rewrite": "ComfyUI H3 改写",
     "video": "ComfyUI 视频",
@@ -40,6 +42,7 @@ FAMILY_LABELS = {
 
 # ComfyUI-backed families share one process; free VRAM whenever we leave any of them
 # for a different family, and also when hopping image → rewrite → video.
+# ``llm`` may also be ComfyUI TextGenerate — unload_family checks llm_backend.
 COMFY_FAMILIES = frozenset({"image", "rewrite", "video"})
 
 
@@ -181,7 +184,11 @@ async def unload_family(family: str, settings: dict) -> list[str]:
         return notes
     try:
         if family == "llm":
-            notes.extend(await unload_ollama(settings.get("ollama_url") or ""))
+            if (settings.get("llm_backend") or "comfy") == "comfy":
+                # Free TextGenerate / CLIP weights before image models load.
+                notes.extend(await free_comfy(settings.get("comfy_url") or ""))
+            else:
+                notes.extend(await unload_ollama(settings.get("ollama_url") or ""))
         elif family in COMFY_FAMILIES:
             notes.extend(await free_comfy(settings.get("comfy_url") or ""))
         elif family == "tts":
@@ -200,7 +207,7 @@ async def unload_ollama(base_url: str) -> list[str]:
     notes: list[str] = []
     models: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httputil.client(url, timeout=8.0) as client:
             response = await client.get(url + "/api/ps")
             if response.status_code < 400:
                 payload = response.json() or {}
@@ -215,7 +222,7 @@ async def unload_ollama(base_url: str) -> list[str]:
         # /api/ps may be older; try tags and unload the preferred one is too aggressive.
         notes.append("Ollama 没有驻留模型，或 /api/ps 不可用")
         return notes
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httputil.client(url, timeout=60.0) as client:
         for name in models:
             try:
                 await client.post(
@@ -234,7 +241,7 @@ async def free_comfy(base_url: str) -> list[str]:
         return ["ComfyUI 地址为空，跳过释放"]
     url = base_url.rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httputil.client(url, timeout=30.0) as client:
             response = await client.post(
                 url + "/free",
                 json={"unload_models": True, "free_memory": True},

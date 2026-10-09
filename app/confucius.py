@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from app import httputil
+
 log = logging.getLogger("novel2video.confucius")
 
 DEFAULT_URL = "http://127.0.0.1:7860"
@@ -87,7 +89,7 @@ def resolve_preset_wav(settings: dict, voice: str) -> Path | None:
 async def health(settings: dict, timeout: float = 4.0) -> dict[str, Any]:
     url = base_url(settings)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httputil.client(url, timeout=timeout) as client:
             response = await client.get(url + "/health")
             response.raise_for_status()
             data = response.json()
@@ -141,7 +143,7 @@ async def synthesize_http(
                 raise ConfuciusError(f"参考音频不存在：{reference}")
             handle = reference.open("rb")
             files = {"reference": (reference.name, handle, "audio/wav")}
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httputil.client(url, timeout=timeout) as client:
             response = await client.post(url + "/api/tts", data=data, files=files)
             if response.status_code >= 400:
                 detail = (response.text or "")[:240]

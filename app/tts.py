@@ -29,6 +29,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from app import httputil
+
 from app import confucius
 
 SAMPLE_RATE = 22050
@@ -299,7 +301,7 @@ class CosyVoiceProvider:
         url = (settings.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
         for path in ("/unload", "/free", "/api/unload"):
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                async with httputil.client(url, timeout=8.0) as client:
                     response = await client.post(url + path)
                     if response.status_code < 500:
                         return f"已请求 CosyVoice {path}"
@@ -310,7 +312,7 @@ class CosyVoiceProvider:
     async def health(self, settings: dict) -> dict:
         url = (settings.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httputil.client(url, timeout=4.0) as client:
                 response = await client.get(url + "/docs")
                 if response.status_code >= 500:
                     return {"ok": False, "detail": f"CosyVoice 返回 {response.status_code}"}
@@ -336,7 +338,7 @@ class CosyVoiceProvider:
         dest.parent.mkdir(parents=True, exist_ok=True)
         data = {"tts_text": text, "spk_id": spk, "speed": str(speed)}
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            async with httputil.client(url, timeout=180.0) as client:
                 response = await client.post(url + "/inference_sft", data=data)
                 if response.status_code >= 400:
                     response = await client.post(

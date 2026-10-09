@@ -1,0 +1,129 @@
+{
+  "id": "n2v-llm-textgen-qwen3",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MarkdownNote",
+      "pos": [40, 40],
+      "size": [420, 280],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## Novel2Video · ComfyUI LLM（分镜）\n\n基于 ComfyUI 内置 `TextGenerate` + `CLIPLoader`（见 `comfy_extras/nodes_textgen.py`）。\n\n默认文本编码器：`text_encoders/qwen_3_4b_fp8_mixed.safetensors`，CLIP 类型 `ltxv`（与官方 Qwen3 文本生成模板一致）。\n\n可选：`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`（更大，类型可改 `minimax`）。\n\n运行时只改：prompt、clip_name、seed、max_length、temperature。文本从 `/history` 的 PreviewAny 输出读取。"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [40, 360],
+      "size": [320, 120],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "qwen_3_4b_fp8_mixed.safetensors",
+        "ltxv",
+        "default"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "TextGenerate",
+      "pos": [420, 360],
+      "size": [420, 320],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1
+        },
+        {
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "generated_text",
+          "type": "STRING",
+          "links": [2],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TextGenerate",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "Output strict JSON only.",
+        4096,
+        "on",
+        0.4,
+        64,
+        0.95,
+        0.05,
+        1.05,
+        42
+      ]
+    },
+    {
+      "id": 4,
+      "type": "PreviewAny",
+      "pos": [900, 360],
+      "size": [480, 360],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [null, null, null]
+    }
+  ],
+  "links": [
+    [1, 2, 0, 3, 0, "CLIP"],
+    [2, 3, 0, 4, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

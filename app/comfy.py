@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import httpx
 
+from app import httputil
+
 try:
     import websockets
 except ImportError:  # pragma: no cover
@@ -71,10 +73,11 @@ def pick_file(files: list[dict], kind: str) -> dict | None:
 class ComfyClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        self.last_prompt_id: str | None = None
 
     async def health(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
+            async with httputil.client(self.base_url, timeout=8) as client:
                 response = await client.get(self.base_url + "/system_stats")
                 response.raise_for_status()
                 return response.json()
@@ -83,7 +86,7 @@ class ComfyClient:
 
     async def free(self, unload_models: bool = True, free_memory: bool = True) -> None:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httputil.client(self.base_url, timeout=30) as client:
                 response = await client.post(
                     self.base_url + "/free",
                     json={"unload_models": unload_models, "free_memory": free_memory},
@@ -94,7 +97,7 @@ class ComfyClient:
 
     async def object_info(self) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httputil.client(self.base_url, timeout=20) as client:
                 response = await client.get(self.base_url + "/object_info")
                 response.raise_for_status()
                 data = response.json()
@@ -110,7 +113,7 @@ class ComfyClient:
         elif path.suffix.lower() == ".webp":
             mime = "image/webp"
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httputil.client(self.base_url, timeout=120) as client:
                 response = await client.post(
                     self.base_url + "/upload/image",
                     data={"overwrite": "true", "type": "input"},
@@ -146,7 +149,7 @@ class ComfyClient:
         """Queue a prompt and return the ``outputs`` block of its history entry."""
         client_id = str(uuid.uuid4())
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httputil.client(self.base_url, timeout=60) as client:
                 response = await client.post(
                     self.base_url + "/prompt",
                     json={"prompt": prompt, "client_id": client_id},
@@ -162,6 +165,7 @@ class ComfyClient:
         prompt_id = body.get("prompt_id")
         if not prompt_id:
             raise ComfyError(f"ComfyUI 没有返回 prompt_id：{body}")
+        self.last_prompt_id = prompt_id
         log(f"已入队 ComfyUI prompt_id={prompt_id}")
 
         watcher = asyncio.create_task(self._watch(client_id, prompt_id, log))
@@ -170,6 +174,7 @@ class ComfyClient:
             deadline = loop.time() + timeout
             while loop.time() < deadline:
                 if should_stop and should_stop():
+                    await self.interrupt(prompt_id)
                     raise ComfyError("已停止")
                 entry = await self._history(prompt_id)
                 if entry is not None:
@@ -186,10 +191,12 @@ class ComfyClient:
                 await watcher
             except asyncio.CancelledError:
                 pass
+            if self.last_prompt_id == prompt_id:
+                self.last_prompt_id = None
 
     async def _history(self, prompt_id: str) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httputil.client(self.base_url, timeout=30) as client:
                 response = await client.get(self.base_url + f"/history/{prompt_id}")
                 response.raise_for_status()
                 payload = response.json()
@@ -232,6 +239,26 @@ class ComfyClient:
         except Exception:
             return
 
+    async def interrupt(self, prompt_id: str | None = None) -> None:
+        """Ask ComfyUI to stop the running job and drop it from the queue."""
+        pid = prompt_id or self.last_prompt_id
+        try:
+            async with httputil.client(self.base_url, timeout=10) as client:
+                await client.post(self.base_url + "/interrupt")
+                if pid:
+                    # delete from pending / running queue
+                    await client.post(self.base_url + "/queue", json={"delete": [pid]})
+                    try:
+                        await client.post(
+                            self.base_url + "/history",
+                            json={"delete": [pid]},
+                        )
+                    except httpx.HTTPError:
+                        pass
+        except httpx.HTTPError:
+            # Best-effort — the local cancel flag still stops our waiter.
+            return
+
     async def download(self, item: dict, dest: Path) -> None:
         params = {
             "filename": item["filename"],
@@ -239,7 +266,7 @@ class ComfyClient:
             "type": item.get("type") or "output",
         }
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httputil.client(self.base_url, timeout=180) as client:
                 response = await client.get(self.base_url + "/view", params=params)
                 response.raise_for_status()
                 dest.parent.mkdir(parents=True, exist_ok=True)

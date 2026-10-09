@@ -259,31 +259,54 @@ async function renderSettings() {
   state.editorKey = "";
   const settings = state.settings || {};
   const files = (state.workflows && state.workflows.files) || [];
-  const models = (state.services && state.services.ollama && state.services.ollama.models) || [];
+  const encoders = (state.services && ((state.services.llm && state.services.llm.models) || (state.services.comfy && state.services.comfy.text_encoders))) || [];
+  const ollamaModels = (state.services && state.services.ollama && state.services.ollama.models) || [];
+  const models = [...new Set([...(encoders || []), ...(ollamaModels || [])])];
   main.innerHTML = `
     <header class="page-head">
       <div>
         <h1>设置</h1>
-        <p class="lede">把地址指到本机的 Ollama 和 ComfyUI。检测按钮会直接告诉你连没连上。</p>
+        <p class="lede">默认分镜走 ComfyUI TextGenerate；Ollama 仍可选。检测会列出缺失节点与模型。</p>
       </div>
       <button type="button" data-action="check">检测连接</button>
     </header>
     <form id="settings-form" class="card">
       <div class="layout">
         <div>
-          <label class="field">Ollama 地址<input name="ollama_url" type="text" value="${esc(settings.ollama_url || "")}"></label>
-          <label class="field">语言模型
-            <input name="llm_model" type="text" list="model-list" value="${esc(settings.llm_model || "")}" placeholder="留空则优先选 Qwen">
-            <datalist id="model-list">${models.map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist>
-          </label>
-          <label class="field">分镜来源
-            <select name="mock_llm">
-              <option value="auto" ${settings.mock_llm === "auto" ? "selected" : ""}>自动：Ollama 失败时用本地分镜</option>
-              <option value="always" ${settings.mock_llm === "always" ? "selected" : ""}>始终本地分镜（不调用 Ollama）</option>
-              <option value="never" ${settings.mock_llm === "never" ? "selected" : ""}>必须使用 Ollama</option>
+          <label class="field">ComfyUI 地址<input name="comfy_url" type="text" value="${esc(settings.comfy_url || "")}"></label>
+          <label class="field">分镜 LLM 后端
+            <select name="llm_backend" id="llm-backend">
+              <option value="comfy" ${(settings.llm_backend || "comfy") === "comfy" ? "selected" : ""}>ComfyUI TextGenerate（默认）</option>
+              <option value="ollama" ${settings.llm_backend === "ollama" ? "selected" : ""}>Ollama（可选）</option>
             </select>
           </label>
-          <label class="field">ComfyUI 地址<input name="comfy_url" type="text" value="${esc(settings.comfy_url || "")}"></label>
+          <label class="field">语言模型 / 文本编码器
+            <input name="llm_model" type="text" list="model-list" value="${esc(settings.llm_model || "")}" placeholder="qwen_3_4b_fp8_mixed.safetensors 或 Ollama 模型名">
+            <datalist id="model-list">${models.map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist>
+          </label>
+          <label class="field">CLIP 类型（ComfyUI）
+            <input name="llm_clip_type" type="text" value="${esc(settings.llm_clip_type || "ltxv")}" placeholder="ltxv / minimax">
+          </label>
+          <label class="field">max_tokens
+            <input name="llm_max_tokens" type="number" min="256" max="32768" step="256" value="${esc(settings.llm_max_tokens ?? 4096)}">
+          </label>
+          <label class="field">temperature
+            <input name="llm_temperature" type="number" min="0.01" max="2" step="0.05" value="${esc(settings.llm_temperature ?? 0.4)}">
+          </label>
+          <label class="field">ComfyUI LLM 失败时回退 Ollama
+            <select name="llm_fallback_ollama">
+              <option value="true" ${settings.llm_fallback_ollama !== false ? "selected" : ""}>开启</option>
+              <option value="false" ${settings.llm_fallback_ollama === false ? "selected" : ""}>关闭</option>
+            </select>
+          </label>
+          <label class="field">Ollama 地址<input name="ollama_url" type="text" value="${esc(settings.ollama_url || "")}"></label>
+          <label class="field">分镜来源
+            <select name="mock_llm">
+              <option value="auto" ${settings.mock_llm === "auto" ? "selected" : ""}>自动：LLM 失败时用本地分镜</option>
+              <option value="always" ${settings.mock_llm === "always" ? "selected" : ""}>始终本地分镜（不调用 LLM）</option>
+              <option value="never" ${settings.mock_llm === "never" ? "selected" : ""}>必须使用 LLM（不回退本地）</option>
+            </select>
+          </label>
           <label class="field">输出目录<input name="output_dir" type="text" value="${esc(settings.output_dir || "output")}"></label>
         </div>
         <div>
@@ -299,6 +322,20 @@ async function renderSettings() {
             </select>
           </label>
           <p class="callout" id="vram-note">${esc(videoNote(settings.video_workflow || "h3_i2v"))}</p>
+          <label class="field">H3 分辨率
+            <select name="h3_resolution">
+              ${[["960x544","960×544（默认）"],["864x480","864×480"],["1344x768","1344×768"]].map(([id,label]) => `<option value="${id}" ${(settings.h3_resolution || "960x544") === id ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">H3 Lightning LoRA
+            <select name="h3_lightning">
+              <option value="true" ${settings.h3_lightning !== false ? "selected" : ""}>开启（缺文件时自动回退）</option>
+              <option value="false" ${settings.h3_lightning === false ? "selected" : ""}>关闭</option>
+            </select>
+          </label>
+          <label class="field">H3 Lightning 步数
+            <input name="h3_steps" type="number" min="1" max="40" step="1" value="${esc(settings.h3_steps ?? 8)}">
+          </label>
           <label class="field">参考图工作流
             <select name="image_workflow">${files.map((name) => `<option ${name === settings.image_workflow ? "selected" : ""}>${esc(name)}</option>`).join("")}</select>
           </label>
@@ -459,7 +496,9 @@ function paintChecks(result) {
   const host = document.getElementById("check-result");
   if (!host || !result) return;
   const line = (item, title) => `<p class="check-line ${item && item.ok ? "ok" : "bad"}">${title}：${esc(item ? item.detail : "没有结果")}</p>`;
-  host.innerHTML = line(result.ollama, "Ollama") + line(result.comfy, "ComfyUI") + line(result.ffmpeg, "FFmpeg")
+  host.innerHTML = line(result.comfy, "ComfyUI") + line(result.llm, "分镜 LLM")
+    + line(result.workflows, "工作流节点/模型")
+    + line(result.ollama, "Ollama") + line(result.ffmpeg, "FFmpeg")
     + (result.rewriter ? line(result.rewriter, "H3 改写节点") : "")
     + (result.tts ? line(result.tts, "配音 TTS") : "")
     + (result.serial ? line(result.serial, "低配串行") : "");
@@ -773,13 +812,14 @@ function drawEditor() {
         ["秒", "duration_sec", "number"],
         ["场景", "scene_id", "text"],
         ["角色", "characters", "tags"],
+        ["说话人", "speaker", "text"],
         ["机位", "camera", "text"],
         ["动作", "action", "area"],
         ["对白", "dialogue", "text"],
         ["音效", "sfx", "text"],
         ["画面提示", "image_prompt", "area"],
         ["运动提示", "motion_prompt", "area"],
-      ], () => ({ shot_id: String((draft.shots || []).length + 1).padStart(3, "0"), duration_sec: 4, scene_id: "", characters: [], camera: "", action: "", dialogue: "", sfx: "", image_prompt: "", motion_prompt: "", status: "pending" }))}
+      ], () => ({ shot_id: String((draft.shots || []).length + 1).padStart(3, "0"), duration_sec: 4, scene_id: "", characters: [], speaker: "", camera: "", action: "", dialogue: "", sfx: "", image_prompt: "", motion_prompt: "", status: "pending" }))}
     </section>`;
 }
 
@@ -969,8 +1009,13 @@ async function saveSettings(form) {
   data.tts_fallback_local = data.tts_fallback_local === "true";
   data.tts_subprocess = data.tts_subprocess === "true";
   data.serial_mode = data.serial_mode === "true";
+  data.llm_fallback_ollama = data.llm_fallback_ollama === "true";
+  data.h3_lightning = data.h3_lightning === "true";
   data.tts_speed = Number(data.tts_speed || 1);
   data.tts_volume = Number(data.tts_volume || 1);
+  data.llm_max_tokens = Number(data.llm_max_tokens || 4096);
+  data.llm_temperature = Number(data.llm_temperature || 0.4);
+  data.h3_steps = Number(data.h3_steps || 8);
   if (data.rewrite_variant === "writer") delete data.rewrite_adapter;
   state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(data) });
   const msg = document.getElementById("settings-msg");

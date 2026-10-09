@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from app import httputil
+
 
 class OllamaError(RuntimeError):
     pass
@@ -43,7 +45,7 @@ def choose_model(models: list[str], preferred: str = "") -> str:
 async def list_models(base_url: str, timeout: float = 8) -> list[str]:
     url = base_url.rstrip("/") + "/api/tags"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httputil.client(base_url, timeout=timeout) as client:
             response = await client.get(url)
             response.raise_for_status()
             payload = response.json()
@@ -79,7 +81,7 @@ async def chat_json(
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httputil.client(base_url, timeout=timeout) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             body = response.json()

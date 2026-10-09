@@ -6,20 +6,23 @@
 
 ```
 阶段 0  接收文稿
-阶段 1  Ollama 文本模型 → 角色 / 场景 / 道具 / 镜头 JSON，可改完再继续
+阶段 1  ComfyUI TextGenerate（默认）→ 角色 / 场景 / 道具 / 镜头 JSON，可改完再继续
+        （可选后端：Ollama；失败可回退 Ollama 或本地分镜）
 阶段 2  ComfyUI · Qwen-Image-2.1 文生图 → 定妆、场景、道具参考图
 阶段 3  ComfyUI · Qwen-Image-2.1 图像编辑（多参考）→ 每镜关键帧
 阶段 3.5 （可选）ComfyUI · MiniMax-H3 Prompt Rewriter → 每镜改写成 H3 结构化提示词
-阶段 4  ComfyUI · MiniMax H3 图生视频（默认）
+阶段 4  ComfyUI · MiniMax H3 图生视频（默认，Lightning LoRA 8 步 + 960×544）
         或 H3 参考生视频，或低显存 Wan2.2（工作流 03c）
-阶段 4.5 （可选）TTS 配音 → 每镜预设音色，对齐后混入成片
+阶段 4.5 （可选）TTS 配音 → 按镜头 speaker 选音色，对齐后混入成片
 阶段 5  FFmpeg 统一分辨率后拼接（可混配音）
 阶段 6  成片复制到输出目录
 ```
 
-编剧用的是 **Qwen 文本模型**（Ollama）。出图用的是 **Qwen-Image-2.1**，不是把图像模型拿来写分镜。
+分镜默认走 **ComfyUI 内置 TextGenerate**（`workflows/05_llm_textgen.json`，CLIPLoader + Qwen 文本编码器）。Ollama 仍可作为可选后端。出图用的是 **Qwen-Image-2.1**，不是把图像模型拿来写分镜。
 
 ## 启动
+
+### Linux / macOS
 
 ```bash
 cd /path/to/this/repo
@@ -28,6 +31,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ./run.sh
 ```
+
+### Windows
+
+```bat
+cd path\to\this\repo
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+run.bat
+```
+
+`run.bat` 会使用 `.venv`，并设置 `NO_PROXY=127.0.0.1,localhost`，避免系统代理（例如 `127.0.0.1:7897`）把本机 Ollama / ComfyUI / TTS 请求拦成 502。应用内对 localhost 的 httpx 请求也会强制 `trust_env=False`。
+
+**端口说明：** Windows 的「排除的端口范围」（`netsh interface ipv4 show excludedportrange protocol=tcp`）有时会占住 `8188` / `8160` 等常用口。若 ComfyUI 起不来，可改用 `8288` 等端口，并在本应用设置里把 ComfyUI 地址改成 `http://127.0.0.1:8288`。
 
 浏览器打开 [http://127.0.0.1:43123](http://127.0.0.1:43123)。
 
@@ -43,17 +60,28 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 43123
 
 | 组件 | 作用 | 默认地址 |
 |------|------|----------|
-| Ollama | 阶段 1 分镜 | http://127.0.0.1:11434 |
-| ComfyUI ≥ 0.30 | 出图、出视频 | http://127.0.0.1:8188 |
+| ComfyUI（含 TextGenerate） | 阶段 1 分镜（默认）+ 出图/出视频 | http://127.0.0.1:8188（或 8288） |
+| Ollama（可选） | 阶段 1 备选 / 回退 | http://127.0.0.1:11434 |
 | FFmpeg | 拼接 | `PATH` 里的 `ffmpeg` |
 
-设置页有三个检测按钮，连不上会写出原因。Ollama 模型列表来自 `ollama list`（`/api/tags`）。留空时优先选名字里带 Qwen、且不是 embedding / vision 的文本模型。
+设置页的「检测连接」会校验 TextGenerate / CLIPLoader、列出 `text_encoders`，并提前报告活动工作流缺失的节点与模型（含精度回退提示）。
 
-没有 GPU 时，在设置里打开 **演示模式**。界面、阶段和拼接仍会跑完，画面是本地占位，不会往 ComfyUI 提交任务。分镜来源可以选「始终本地分镜」，这样也不依赖 Ollama。
+没有 GPU 时，在设置里打开 **演示模式**。界面、阶段和拼接仍会跑完，画面是本地占位；演示产物带 `.demo` 标记，关掉演示模式后不会被当成已完成而跳过。分镜来源可以选「始终本地分镜」。
 
 ## 模型放哪
 
-权重放到 **ComfyUI 的 `models/`**，不是这个仓库。模板里的文件名就是加载节点要选的文件名。
+权重放到 **ComfyUI 的 `models/`**，不是这个仓库。模板里的文件名就是加载节点要选的文件名；若本机只有其他精度（fp16 / bf16 / fp8 / int8_convrot 等），排队前会按 `/object_info` 自动匹配同名其他版本。
+
+### 分镜 LLM（阶段 1，ComfyUI TextGenerate）
+
+工作流：`workflows/05_llm_textgen.json`（UI 格式，运行时扁平化）。需要较新的 ComfyUI（含 `comfy_extras/nodes_textgen.py`）。
+
+| 文件 | 目录 | 说明 |
+|------|------|------|
+| `qwen_3_4b_fp8_mixed.safetensors` | `models/text_encoders/` | **默认**（约 5.2 GB），CLIP 类型 `ltxv` |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `models/text_encoders/` | 可选更大模型（约 14.6 GB），类型可改 `minimax` |
+
+设置里可从 `/object_info` 列出的编码器中挑选。小模型 JSON 不稳时会自动重试；仍失败且开启回退时改走 Ollama。串行模式下 LLM 结束后会调用 ComfyUI `/free` 再进入出图。
 
 ### Qwen-Image-2.1（阶段 2、3）
 
@@ -82,8 +110,10 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 43123
 | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `text_encoders/` | 文本编码 |
 | `minimax_h3_video_vae_int8_convrot.safetensors` | `vae/` | 视频 VAE |
 | `minimax_h3_audio_vae_fp32.safetensors` | `vae/` | 音频 VAE |
+| `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` | `loras/` | I2V Lightning 8 步（默认开启） |
+| `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` | `loras/` | R2V Lightning 4 步 |
 
-16:9 默认画布 **1344×768**。H3 很吃显存；显存不够就改用下面的 Wan 分支。开源包没有平台侧的 2K 再生。
+16:9 默认画布 **960×544**（设置可选 `864×480` / `1344×768`）。默认开启 Lightning LoRA；若缺 LoRA 文件会自动关闭并提示。显存不够可改用 Wan 分支。
 
 ### Wan2.2（低显存，工作流 03c）
 

@@ -160,6 +160,19 @@ WIDGET_SPECS: dict[str, list[tuple[str, Any]]] = {
         ("adapter", str),
     ],
     "PreviewAny": [("preview", SKIP)],
+    # comfy_extras/nodes_textgen.py TextGenerate — DynamicCombo sampling_mode
+    # expands nested widgets when mode is "on". Packed back to a dict in app.llm.
+    "TextGenerate": [
+        ("prompt", str),
+        ("max_length", int),
+        ("sampling_mode", str),
+        ("temperature", float),
+        ("top_k", int),
+        ("top_p", float),
+        ("min_p", float),
+        ("repetition_penalty", float),
+        ("seed", int),
+    ],
 }
 
 
@@ -782,16 +795,21 @@ def build_prompt_file(path: Path, job: dict | None = None, object_info: dict | N
     return build_prompt(load_workflow(path), job, object_info)
 
 
-def dimensions(aspect: str, kind: str) -> tuple[int, int]:
-    """Pixel sizes used when injecting width/height.
+# H3 canvas presets (multiple of 32). Default is 960×544 (~0.5 MP) for 24 GB cards.
+H3_RESOLUTIONS: dict[str, dict[str, tuple[int, int]]] = {
+    "864x480": {"16:9": (864, 480), "9:16": (480, 864), "1:1": (640, 640)},
+    "960x544": {"16:9": (960, 544), "9:16": (544, 960), "1:1": (768, 768)},
+    "1344x768": {"16:9": (1344, 768), "9:16": (768, 1344), "1:1": (1024, 1024)},
+}
 
-    H3 16:9 follows the template note: 1344×768 (about 0.98 MP). Wan stays
-    smaller for the low-VRAM branch.
-    """
+
+def dimensions(aspect: str, kind: str, h3_resolution: str = "960x544") -> tuple[int, int]:
+    """Pixel sizes used when injecting width/height."""
     aspect = aspect if aspect in {"16:9", "9:16", "1:1"} else "16:9"
+    h3_key = h3_resolution if h3_resolution in H3_RESOLUTIONS else "960x544"
     table = {
-        "image": {"16:9": (1344, 768), "9:16": (768, 1344), "1:1": (1024, 1024)},
-        "h3": {"16:9": (1344, 768), "9:16": (768, 1344), "1:1": (1024, 1024)},
+        "image": {"16:9": (1024, 576), "9:16": (576, 1024), "1:1": (768, 768)},
+        "h3": H3_RESOLUTIONS[h3_key],
         "wan": {"16:9": (832, 480), "9:16": (480, 832), "1:1": (640, 640)},
     }
     return table.get(kind, table["image"])[aspect]

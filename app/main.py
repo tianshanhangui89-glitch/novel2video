@@ -29,10 +29,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 class SettingsIn(BaseModel):
     ollama_url: str | None = None
     comfy_url: str | None = None
+    llm_backend: str | None = None
     llm_model: str | None = None
+    llm_workflow: str | None = None
+    llm_clip_type: str | None = None
+    llm_max_tokens: int | None = None
+    llm_temperature: float | None = None
+    llm_fallback_ollama: bool | None = None
     image_workflow: str | None = None
     edit_workflow: str | None = None
     video_workflow: str | None = None
+    h3_resolution: str | None = None
+    h3_steps: int | None = None
+    h3_lightning: bool | None = None
     output_dir: str | None = None
     style: str | None = None
     aspect: str | None = None
@@ -194,6 +203,9 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         project["style"] = project["storyboard"]["style"]
         project["aspect"] = project["storyboard"]["aspect"]
+        n_shots = len(project["storyboard"].get("shots") or [])
+        if project.get("stages", {}).get("stage1", {}).get("status") == "done":
+            project["stages"]["stage1"]["message"] = f"{n_shots} 镜"
         return store.save_project(project)
 
     @app.post("/api/projects/{project_id}/voices")

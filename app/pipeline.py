@@ -10,7 +10,14 @@ import shutil
 from pathlib import Path
 
 from app.comfy import ComfyClient, ComfyError, pick_file
-from app.convert import build_prompt_file, dimensions, load_workflow
+from app.convert import build_prompt, dimensions, load_workflow
+from app.llm import LLMError, chat_json_resilient
+from app.models import (
+    enable_lightning_lora,
+    lightning_lora_available,
+    lightning_lora_filenames,
+    patch_prompt_models,
+)
 from app.rewrite import (
     H3_WORKFLOWS,
     build_rewrite_prompt,
@@ -22,11 +29,11 @@ from app.rewrite import (
 )
 from app.rewrite import variant as rewrite_variant
 from app.demo_media import write_card, write_clip, write_speech
-from app.ollama import OllamaError, chat_json, choose_model, list_models
+from app.ollama import OllamaError
 from app.store import STAGE_IDS, VIDEO_WORKFLOWS, Store, now_iso
-from app.storyboard import StoryboardError, mock_storyboard, normalize_storyboard, parse_json_content, system_prompt
+from app.storyboard import StoryboardError, mock_storyboard, normalize_storyboard, system_prompt
 from app.stitch import StitchError, pad_or_trim_video, probe_duration, stitch
-from app.tts import TTSError, get_provider, provider_info, speakable_text
+from app.tts import get_provider, provider_info, speakable_text
 from app.resources import FAMILY_LABELS, GATE, unload_family
 
 log = logging.getLogger("novel2video")
@@ -224,6 +231,9 @@ class Engine:
             )
             project["style"] = project["storyboard"]["style"]
             project["aspect"] = project["storyboard"]["aspect"]
+            n_shots = len(project["storyboard"].get("shots") or [])
+            if project.get("stages", {}).get("stage1", {}).get("status") == "done":
+                project["stages"]["stage1"]["message"] = f"{n_shots} 镜"
             self.store.save_project(project)
         gate = self.gates.get(project_id)
         task = self.tasks.get(project_id)
@@ -239,18 +249,38 @@ class Engine:
         gate = self.gates.get(project_id)
         if gate:
             gate.set()
+        settings = self.store.load_settings()
+        try:
+            await ComfyClient(settings["comfy_url"]).interrupt()
+        except Exception:
+            pass
         task = self.tasks.get(project_id)
         if task and not task.done():
             try:
-                await asyncio.wait_for(task, timeout=5)
+                await asyncio.wait_for(task, timeout=8)
             except (asyncio.TimeoutError, Cancelled, Exception):
-                pass
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (Cancelled, asyncio.CancelledError, Exception):
+                        pass
+                project = self.store.load_project(project_id)
+                self._mark_stopped(project)
+                await self._release_gpu_after_run(project_id)
         else:
             project = self.store.load_project(project_id)
-            project["status"] = "cancelled"
-            project["current_label"] = "已停止"
-            self.log(project, "已停止", "warning")
+            self._mark_stopped(project)
         return self.store.load_project(project_id)
+
+    def _mark_stopped(self, project: dict) -> None:
+        project["status"] = "cancelled"
+        project["current_label"] = "已停止"
+        project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
+        for stage_id, stage in (project.get("stages") or {}).items():
+            if stage.get("status") == "running":
+                project["stages"][stage_id] = {"status": "cancelled", "message": "已停止"}
+        self.log(project, "已停止", "warning")
 
     async def _run(self, project_id: str, from_stage: str) -> None:
         project = self.store.load_project(project_id)
@@ -266,7 +296,9 @@ class Engine:
                 if self.store.load_settings().get("mock_llm") == "always":
                     await self._stage1(project_id)
                 else:
-                    async with self._gpu(project_id, "llm", "stage1", "分镜 · Ollama"):
+                    backend = self.store.load_settings().get("llm_backend") or "comfy"
+                    label = "分镜 · ComfyUI" if backend == "comfy" else "分镜 · Ollama"
+                    async with self._gpu(project_id, "llm", "stage1", label):
                         await self._stage1(project_id)
                 await self._wait_approval(project_id)
             if due("stage2"):
@@ -309,10 +341,7 @@ class Engine:
             await self._release_gpu_after_run(project_id)
         except Cancelled:
             project = self.store.load_project(project_id)
-            project["status"] = "cancelled"
-            project["current_label"] = "已停止"
-            project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
-            self.log(project, "流水线已停止", "warning")
+            self._mark_stopped(project)
             await self._release_gpu_after_run(project_id)
         except Exception as exc:
             project = self.store.load_project(project_id)
@@ -404,7 +433,9 @@ class Engine:
         except Exception as exc:
             if settings.get("mock_llm") == "never":
                 raise
-            if settings.get("mock_llm") == "always" or isinstance(exc, (OllamaError, StoryboardError, OSError)):
+            if settings.get("mock_llm") == "always" or isinstance(
+                exc, (OllamaError, StoryboardError, LLMError, OSError, ComfyError)
+            ):
                 project = self.store.load_project(project_id)
                 self.log(project, f"语言模型不可用，改用本地分镜。原因：{exc}", "warning")
                 board = mock_storyboard(
@@ -426,17 +457,30 @@ class Engine:
     async def _storyboard_from_llm(self, project, settings, script, style, aspect) -> dict:
         if settings.get("mock_llm") == "always":
             raise OllamaError("设置要求使用本地分镜")
-        models = await list_models(settings["ollama_url"])
-        model = choose_model(models, settings.get("llm_model") or "")
-        self.log(project, f"使用 Ollama 模型 {model}")
         user = (
             f"全局画风 style: {style}\n"
             f"画幅 aspect: {aspect}\n"
-            "请同时给出 props（关键道具，可为空数组）。只输出 JSON。\n\n"
+            "请同时给出 props（关键道具，可为空数组）。"
+            "有对白的镜头必须填 speaker（角色 id），且不得漏掉原文台词。只输出 JSON。\n\n"
             f"---章节正文---\n{script}"
         )
-        raw = await chat_json(settings["ollama_url"], model, system_prompt(), user)
-        data = parse_json_content(raw)
+        backend = (settings.get("llm_backend") or "comfy").strip().lower()
+        self.log(project, f"分镜后端：{'ComfyUI TextGenerate' if backend == 'comfy' else 'Ollama'}")
+
+        def logger(message: str) -> None:
+            self.log(self.store.load_project(project["id"]), message)
+
+        try:
+            data, used = await chat_json_resilient(
+                settings,
+                system_prompt(),
+                user,
+                log=logger,
+                should_stop=lambda: bool(self.cancel_flags.get(project["id"])),
+            )
+        except LLMError as exc:
+            raise StoryboardError(str(exc)) from exc
+        self.log(self.store.load_project(project["id"]), f"分镜 JSON 来自 {used}")
         return normalize_storyboard(
             data,
             project_id=project["id"],
@@ -748,7 +792,12 @@ class Engine:
                 self.log(project, f"镜头 {sid} 没有对白或旁白，跳过配音")
                 self.publish(project)
                 continue
-            if dest.is_file() and shot.get("tts_audio") == rel and shot.get("tts_text") == text:
+            if (
+                dest.is_file()
+                and shot.get("tts_audio") == rel
+                and shot.get("tts_text") == text
+                and (demo or not self._demo_marker(dest).is_file())
+            ):
                 self.log(project, f"镜头 {sid} 已有配音，跳过")
                 spoken += 1
                 continue
@@ -759,8 +808,10 @@ class Engine:
                 if demo:
                     await asyncio.sleep(0.08)
                     duration = await asyncio.to_thread(write_speech, dest, text, speed)
+                    self._mark_demo(dest)
                     source = "demo"
                 else:
+                    self._clear_demo_marker(dest)
                     try:
                         duration = await provider.synthesize(
                             text,
@@ -827,16 +878,23 @@ class Engine:
         self.set_stage(project, "stage4t", "done", f"{spoken}/{len(shots)} 条")
 
     def _resolve_shot_voice(self, project: dict, shot: dict, settings: dict) -> tuple[str, Path | None, str]:
-        """Pick preset voice id and optional authorized reference WAV for one shot."""
+        """Pick preset voice id and optional authorized reference WAV for one shot.
+
+        Prefer ``shot.speaker``; fall back to the first cast character, then the
+        project default voice (旁白).
+        """
         default_voice = (settings.get("tts_voice") or "speaker1").strip() or "speaker1"
         board = project.get("storyboard") or {}
         characters = {item.get("id"): item for item in (board.get("characters") or []) if item.get("id")}
-        char_ids = shot.get("characters") or []
         character = None
-        for cid in char_ids:
-            if cid in characters:
-                character = characters[cid]
-                break
+        speaker = (shot.get("speaker") or "").strip()
+        if speaker and speaker in characters:
+            character = characters[speaker]
+        if character is None:
+            for cid in shot.get("characters") or []:
+                if cid in characters:
+                    character = characters[cid]
+                    break
         if character is None and not (shot.get("dialogue") or "").strip():
             # Narration / no cast → project default (旁白).
             return default_voice, None, "旁白 · 默认音色"
@@ -866,7 +924,7 @@ class Engine:
         return preset, None, f"{character.get('name') or character['id']} · 预设 {preset}"
 
     async def _align_shot_to_audio(self, project_id: str, shot_id: str, audio_sec: float) -> None:
-        """Pad or trim the shot video so it covers the voiceover."""
+        """Pad the shot video so it covers voiceover without shortening the plan."""
         project = self.store.load_project(project_id)
         shot = next(
             (
@@ -886,21 +944,23 @@ class Engine:
             video_sec = await asyncio.to_thread(probe_duration, path)
         except StitchError:
             return
-        if audio_sec <= video_sec + 0.08:
-            if audio_sec > float(shot.get("duration_sec") or 0):
-                shot["duration_sec"] = round(max(video_sec, audio_sec), 2)
-                self.publish(project)
+        planned = float(shot.get("duration_sec") or 0)
+        # Never shrink below the planned shot length or the current video.
+        target = max(float(audio_sec or 0), video_sec, planned)
+        if target <= video_sec + 0.08:
+            shot["duration_sec"] = round(max(video_sec, planned, float(audio_sec or 0)), 2)
+            self.publish(project)
             return
         aligned = path.with_name(path.stem + "_aligned" + path.suffix)
         try:
-            new_dur = await asyncio.to_thread(pad_or_trim_video, path, aligned, audio_sec)
+            new_dur = await asyncio.to_thread(pad_or_trim_video, path, aligned, target)
         except StitchError as exc:
             self.log(project, f"镜头 {shot_id} 对齐失败，仍用原视频：{exc}", "warning")
             return
         aligned.replace(path)
-        shot["duration_sec"] = round(new_dur, 2)
+        shot["duration_sec"] = round(max(new_dur, planned), 2)
         shot["video"] = rel
-        self.log(project, f"镜头 {shot_id} 视频从 {video_sec:.2f}s 对齐到 {new_dur:.2f}s（配音）")
+        self.log(project, f"镜头 {shot_id} 视频从 {video_sec:.2f}s 对齐到 {shot['duration_sec']:.2f}s（配音，不少于原定时长）")
         self.publish(project)
 
     def _assign_tts(
@@ -962,7 +1022,11 @@ class Engine:
             width, height = _demo_size(project.get("aspect") or "16:9")
         else:
             kind = "wan" if project.get("video_workflow") == "wan22" else "h3"
-            width, height = dimensions(project.get("aspect") or "16:9", kind)
+            width, height = dimensions(
+                project.get("aspect") or "16:9",
+                kind,
+                h3_resolution=settings.get("h3_resolution") or "960x544",
+            )
         dest = self.store.media_dir(project_id) / "final" / "chapter.mp4"
         work = self.store.media_dir(project_id) / "final" / "norm"
         volume = float(settings.get("tts_volume") or 1.0) if settings.get("tts_enabled") else 1.0
@@ -1016,8 +1080,10 @@ class Engine:
         if settings.get("demo_mode"):
             title = Path(dest_rel).stem
             await asyncio.to_thread(write_card, dest, title, prompt[:70], project.get("aspect") or "16:9", "参考" if "characters" in dest_rel or "scenes" in dest_rel or "props" in dest_rel else "关键帧")
+            self._mark_demo(dest)
             self.log(self.store.load_project(project_id), f"演示模式写出 {dest_rel}")
             return
+        self._clear_demo_marker(dest)
         await self._comfy_render(
             project_id,
             workflow_name=workflow_name,
@@ -1045,8 +1111,10 @@ class Engine:
                 else:
                     await asyncio.to_thread(write_card, still, Path(dest_rel).stem, prompt[:70], project.get("aspect") or "16:9", "视频")
             await asyncio.to_thread(write_clip, still, dest, duration)
+            self._mark_demo(dest)
             self.log(self.store.load_project(project_id), f"演示模式写出 {dest_rel}（预览最长 2 秒）")
             return
+        self._clear_demo_marker(dest)
         await self._comfy_render(
             project_id,
             workflow_name=workflow_name,
@@ -1082,13 +1150,32 @@ class Engine:
             if not path.is_file():
                 raise ComfyError(f"参考图不存在：{path}")
             uploaded.append(await client.upload_image(path))
-        width, height = dimensions(project.get("aspect") or "16:9", kind)
+        h3_res = settings.get("h3_resolution") or "960x544"
+        width, height = dimensions(project.get("aspect") or "16:9", kind, h3_resolution=h3_res)
         info = await client.object_info()
         try:
-            workflow = self.store.workflow_path(workflow_name)
+            workflow_path = self.store.workflow_path(workflow_name)
         except FileNotFoundError as exc:
             raise ComfyError(str(exc)) from exc
-        graph = build_prompt_file(
+        workflow = load_workflow(workflow_path)
+        if kind == "h3":
+            want_lightning = bool(settings.get("h3_lightning", True))
+            steps = int(settings.get("h3_steps") or 8)
+            lora_names = lightning_lora_filenames(workflow)
+            if want_lightning:
+                ok, note = lightning_lora_available(info, lora_names)
+                if ok:
+                    for msg in enable_lightning_lora(workflow, enabled=True, steps=steps):
+                        self.log(project, msg)
+                else:
+                    for msg in enable_lightning_lora(workflow, enabled=False, steps=steps):
+                        self.log(project, msg)
+                    self.log(project, (note or "Lightning LoRA 不可用") + "，已回退完整步数", "warning")
+            else:
+                for msg in enable_lightning_lora(workflow, enabled=False, steps=steps):
+                    self.log(project, msg)
+            self.log(project, f"H3 画布 {width}×{height}（{h3_res}）")
+        graph = build_prompt(
             workflow,
             {
                 "prompt": prompt,
@@ -1102,7 +1189,9 @@ class Engine:
             },
             info,
         )
-        self.log(project, f"提交 {workflow.name}，API 节点 {len(graph)} 个")
+        for note in patch_prompt_models(graph, info):
+            self.log(project, note, "warning")
+        self.log(project, f"提交 {workflow_path.name}，API 节点 {len(graph)} 个")
 
         def logger(message: str) -> None:
             current = self.store.load_project(project_id)
@@ -1133,8 +1222,32 @@ class Engine:
         if shot.get("status") == "video":
             shot["status"] = "keyframe"
 
+    def _demo_marker(self, path: Path) -> Path:
+        return Path(str(path) + ".demo")
+
+    def _mark_demo(self, path: Path) -> None:
+        marker = self._demo_marker(path)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("demo\n", encoding="utf-8")
+
+    def _clear_demo_marker(self, path: Path) -> None:
+        marker = self._demo_marker(path)
+        if marker.is_file():
+            marker.unlink()
+
     def _exists(self, project_id: str, rel: str) -> bool:
-        return bool(rel) and (self.store.media_dir(project_id) / rel).is_file()
+        """True when a real (non-demo) artifact can be reused for the current mode."""
+        if not rel:
+            return False
+        path = self.store.media_dir(project_id) / rel
+        if not path.is_file():
+            return False
+        demo_artifact = self._demo_marker(path).is_file()
+        demo_mode = bool(self.store.load_settings().get("demo_mode"))
+        if demo_artifact and not demo_mode:
+            # Previous demo run left placeholders — must regenerate for real ComfyUI.
+            return False
+        return True
 
     def _assign_ref(self, project: dict, folder: str, item_id: str, rel: str) -> None:
         board = project["storyboard"]

@@ -48,6 +48,7 @@
       "camera": "中景，缓慢推近",
       "action": "推门而入，看向梁下的油灯，再环顾四周",
       "dialogue": "总算到了。",
+      "speaker": "c_hero",
       "sfx": "木门吱呀，雨声",
       "image_prompt": "anime cel-shading, young man in slate-blue robe pushing open a wooden inn door, warm oil lamps, rainy night outside, medium shot, cinematic lighting",
       "motion_prompt": "slow push-in as the door opens, rain visible through doorway, character turns head to look around, natural cloth movement"
@@ -60,6 +61,7 @@
       "camera": "近景",
       "action": "擦去肩上雨水，看向柜台",
       "dialogue": "",
+      "speaker": "",
       "sfx": "雨声渐弱",
       "image_prompt": "close-up of young man in slate-blue robe wiping rain from his shoulder inside a wooden inn, warm lamp light, consistent face",
       "motion_prompt": "subtle head turn toward the counter, hand wiping the shoulder, soft ambient motion"

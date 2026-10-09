@@ -11,7 +11,8 @@
     "characters": ["角色id"],
     "camera": "景别+运镜",
     "action": "画面动作",
-    "dialogue": "对白，可空",
+    "dialogue": "对白，可空；有人说话时必须写出原文台词，不得漏句",
+    "speaker": "说出该句台词的角色 id；无对白可空字符串",
     "sfx": "音效",
     "image_prompt": "英文为主的关键帧提示，含画风与角色外貌关键词",
     "motion_prompt": "英文运镜/动作描述，供图生视频"
@@ -26,3 +27,5 @@
 5. duration_sec 在 4 到 8 之间；对白多就拆镜，不要无意义拉长。
 6. props 只收会反复入画的物件；没有就输出空数组。
 7. ref_prompt 用英文，方便文生图；appearance / visual 用中文，方便人读。
+8. 原文里出现的对白必须落入某镜的 dialogue，禁止遗漏；每句有对白的镜头必须填 speaker（角色 id）。旁白/无对白时 speaker 为空字符串。
+9. 只输出 JSON 对象，不要解释、不要代码围栏。

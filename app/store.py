@@ -43,10 +43,19 @@ DEFAULT_STYLE = "anime cel-shading, consistent character design, cinematic light
 DEFAULT_SETTINGS: dict[str, Any] = {
     "ollama_url": "http://127.0.0.1:11434",
     "comfy_url": "http://127.0.0.1:8188",
-    "llm_model": "",
+    "llm_backend": "comfy",
+    "llm_model": "qwen_3_4b_fp8_mixed.safetensors",
+    "llm_workflow": "05_llm_textgen.json",
+    "llm_clip_type": "ltxv",
+    "llm_max_tokens": 4096,
+    "llm_temperature": 0.4,
+    "llm_fallback_ollama": True,
     "image_workflow": "01_character_t2i.json",
     "edit_workflow": "02_shot_edit.json",
     "video_workflow": "h3_i2v",
+    "h3_resolution": "960x544",
+    "h3_steps": 8,
+    "h3_lightning": True,
     "output_dir": "output",
     "style": DEFAULT_STYLE,
     "aspect": "16:9",
@@ -80,7 +89,11 @@ BOOL_SETTINGS = (
     "tts_fallback_local",
     "tts_subprocess",
     "serial_mode",
+    "llm_fallback_ollama",
+    "h3_lightning",
 )
+
+H3_RESOLUTION_CHOICES = ("864x480", "960x544", "1344x768")
 
 
 def _as_bool(value: Any) -> bool:
@@ -101,13 +114,13 @@ VIDEO_WORKFLOWS = {
         "id": "h3_i2v",
         "file": "03_h3_i2v.json",
         "label": "MiniMax H3 图生视频",
-        "note": "默认。需要较大显存，画布 1344×768。",
+        "note": "默认。可开 Lightning LoRA 8 步；默认画布 960×544（可在设置改）。",
     },
     "h3_r2v": {
         "id": "h3_r2v",
         "file": "03b_h3_r2v.json",
         "label": "MiniMax H3 参考生视频",
-        "note": "用角色参考锁一致性，显存需求与 H3 I2V 同级。",
+        "note": "用角色参考锁一致性；Lightning 为 4 步 LoRA。",
     },
     "wan22": {
         "id": "wan22",
@@ -160,6 +173,21 @@ class Store:
             current["tts_provider"] = "confucius4"
         if current.get("tts_text_mode") not in {"dialogue", "dialogue_or_action"}:
             current["tts_text_mode"] = "dialogue_or_action"
+        if current.get("llm_backend") not in {"comfy", "ollama"}:
+            current["llm_backend"] = "comfy"
+        if current.get("h3_resolution") not in H3_RESOLUTION_CHOICES:
+            current["h3_resolution"] = "960x544"
+        try:
+            current["h3_steps"] = max(1, min(40, int(current.get("h3_steps") or 8)))
+        except (TypeError, ValueError):
+            current["h3_steps"] = 8
+        try:
+            current["llm_max_tokens"] = max(256, min(32768, int(current.get("llm_max_tokens") or 4096)))
+        except (TypeError, ValueError):
+            current["llm_max_tokens"] = 4096
+        current["llm_temperature"] = _clamp_float(current.get("llm_temperature"), 0.4, 0.01, 2.0)
+        current["llm_workflow"] = str(current.get("llm_workflow") or "05_llm_textgen.json").strip()
+        current["llm_clip_type"] = str(current.get("llm_clip_type") or "ltxv").strip() or "ltxv"
         current["tts_lang"] = str(current.get("tts_lang") or "zh").strip() or "zh"
         current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
         current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
@@ -191,6 +219,22 @@ class Store:
         current["tts_confucius_python"] = str(current.get("tts_confucius_python") or "").strip()
         current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
         current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
+        if current.get("llm_backend") not in {"comfy", "ollama"}:
+            current["llm_backend"] = "comfy"
+        if current.get("h3_resolution") not in H3_RESOLUTION_CHOICES:
+            current["h3_resolution"] = "960x544"
+        try:
+            current["h3_steps"] = max(1, min(40, int(current.get("h3_steps") or 8)))
+        except (TypeError, ValueError):
+            current["h3_steps"] = 8
+        try:
+            current["llm_max_tokens"] = max(256, min(32768, int(current.get("llm_max_tokens") or 4096)))
+        except (TypeError, ValueError):
+            current["llm_max_tokens"] = 4096
+        current["llm_temperature"] = _clamp_float(current.get("llm_temperature"), 0.4, 0.01, 2.0)
+        current["llm_model"] = str(current.get("llm_model") or "").strip()
+        current["llm_workflow"] = str(current.get("llm_workflow") or "05_llm_textgen.json").strip()
+        current["llm_clip_type"] = str(current.get("llm_clip_type") or "ltxv").strip() or "ltxv"
         current["ollama_url"] = str(current["ollama_url"]).rstrip("/")
         current["comfy_url"] = str(current["comfy_url"]).rstrip("/")
         self.settings_path().write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
