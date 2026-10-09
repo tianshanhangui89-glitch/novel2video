@@ -719,19 +719,18 @@ class Engine:
             self.set_stage(project, "stage4t", "done", "未启用")
             return
         info = provider_info(settings.get("tts_provider"))
-        if info.cloning:
-            raise TTSError(info.note)
         demo = bool(settings.get("demo_mode"))
         provider = get_provider(settings.get("tts_provider"))
         mode = settings.get("tts_text_mode") or "dialogue_or_action"
-        voice = settings.get("tts_voice") or "中文女"
+        default_voice = settings.get("tts_voice") or "speaker1"
         speed = float(settings.get("tts_speed") or 1.0)
+        lang = settings.get("tts_lang") or "zh"
         label = info.label
         self.set_stage(project, "stage4t", "running", label)
         if demo:
             self.log(project, f"演示模式模拟配音（{label}）")
         else:
-            self.log(project, f"配音：{label} · 音色 {voice} · 语速 {speed:g}")
+            self.log(project, f"配音：{label} · 默认音色 {default_voice} · 语种 {lang} · 语速 {speed:g}")
 
         spoken = 0
         for index, shot in enumerate(shots, start=1):
@@ -739,6 +738,7 @@ class Engine:
             project = self.store.load_project(project_id)
             sid = shot["shot_id"]
             text = speakable_text(shot, mode)
+            voice, reference, voice_note = self._resolve_shot_voice(project, shot, settings)
             project["current_label"] = f"镜头 {sid} · 配音"
             self.set_stage(project, "stage4t", "running", f"{index}/{len(shots)} · {label}")
             rel = f"shots/{sid}_tts.wav"
@@ -752,7 +752,7 @@ class Engine:
                 self.log(project, f"镜头 {sid} 已有配音，跳过")
                 spoken += 1
                 continue
-            note = ""
+            note = voice_note
             source = "tts"
             duration = 0.0
             try:
@@ -761,14 +761,39 @@ class Engine:
                     duration = await asyncio.to_thread(write_speech, dest, text, speed)
                     source = "demo"
                 else:
-                    duration = await provider.synthesize(
-                        text,
-                        dest,
-                        voice=voice,
-                        speed=speed,
-                        settings=settings,
-                    )
-                    source = settings.get("tts_provider") or "tts"
+                    try:
+                        duration = await provider.synthesize(
+                            text,
+                            dest,
+                            voice=voice,
+                            speed=speed,
+                            settings=settings,
+                            reference=reference,
+                            lang=lang,
+                        )
+                        source = settings.get("tts_provider") or "tts"
+                    except Exception as primary_exc:
+                        if (
+                            settings.get("tts_fallback_local")
+                            and (settings.get("tts_provider") or "") != "local"
+                        ):
+                            self.log(
+                                self.store.load_project(project_id),
+                                f"镜头 {sid} 主配音失败，回退本地占位：{primary_exc}",
+                                "warning",
+                            )
+                            fallback = get_provider("local")
+                            duration = await fallback.synthesize(
+                                text,
+                                dest,
+                                voice="zh",
+                                speed=speed,
+                                settings=settings,
+                            )
+                            source = "local_fallback"
+                            note = (note + "；" if note else "") + f"主引擎失败后回退：{primary_exc}"[:200]
+                        else:
+                            raise
             except Cancelled:
                 raise
             except Exception as exc:
@@ -795,10 +820,50 @@ class Engine:
                 note=note,
             )
             if source not in {"failed", "skip"}:
-                self.log(project, f"镜头 {sid} 配音 {duration:.2f} 秒：「{text[:40]}」")
+                who = reference.name if reference else voice
+                self.log(project, f"镜头 {sid} 配音 {duration:.2f} 秒 · {who}：「{text[:40]}」")
             self.publish(project)
         project = self.store.load_project(project_id)
         self.set_stage(project, "stage4t", "done", f"{spoken}/{len(shots)} 条")
+
+    def _resolve_shot_voice(self, project: dict, shot: dict, settings: dict) -> tuple[str, Path | None, str]:
+        """Pick preset voice id and optional authorized reference WAV for one shot."""
+        default_voice = (settings.get("tts_voice") or "speaker1").strip() or "speaker1"
+        board = project.get("storyboard") or {}
+        characters = {item.get("id"): item for item in (board.get("characters") or []) if item.get("id")}
+        char_ids = shot.get("characters") or []
+        character = None
+        for cid in char_ids:
+            if cid in characters:
+                character = characters[cid]
+                break
+        if character is None and not (shot.get("dialogue") or "").strip():
+            # Narration / no cast → project default (旁白).
+            return default_voice, None, "旁白 · 默认音色"
+        if character is None:
+            return default_voice, None, "默认音色"
+        ref_rel = (character.get("voice_ref") or "").strip()
+        if ref_rel:
+            if not character.get("voice_ref_authorized"):
+                return (
+                    character.get("voice_preset") or default_voice,
+                    None,
+                    f"{character.get('name') or character['id']}：参考音未勾选授权，改用预设",
+                )
+            path = self.store.media_dir(project["id"]) / ref_rel
+            if path.is_file():
+                return (
+                    character.get("voice_preset") or default_voice,
+                    path,
+                    f"{character.get('name') or character['id']} · 已授权参考音",
+                )
+            return (
+                character.get("voice_preset") or default_voice,
+                None,
+                f"{character.get('name') or character['id']}：参考音文件丢失，改用预设",
+            )
+        preset = (character.get("voice_preset") or default_voice).strip() or default_voice
+        return preset, None, f"{character.get('name') or character['id']} · 预设 {preset}"
 
     async def _align_shot_to_audio(self, project_id: str, shot_id: str, audio_sec: float) -> None:
         """Pad or trim the shot video so it covers the voiceover."""

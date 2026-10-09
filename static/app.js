@@ -170,8 +170,10 @@ function ttsVoices(id) {
 
 const TTS_SOURCE = {
   demo: "演示配音",
+  confucius4: "Confucius4",
   cosyvoice: "CosyVoice",
   local: "本地占位",
+  local_fallback: "本地回退",
   tts: "已配音",
   skip: "跳过",
   failed: "失败",
@@ -324,14 +326,17 @@ async function renderSettings() {
 }
 
 function ttsSettings(settings) {
-  const provider = settings.tts_provider || "cosyvoice";
+  const provider = settings.tts_provider || "confucius4";
   const voices = ttsVoices(provider);
-  const needsUrl = (ttsProvider(provider) || {}).needs_url;
-  const cloning = (ttsProvider(provider) || {}).cloning;
+  const found = ttsProvider(provider) || {};
+  const needsUrl = found.needs_url;
+  const isConf = provider === "confucius4";
+  const urlDefault = isConf ? "http://127.0.0.1:7860" : "http://127.0.0.1:50000";
+  const voiceDefault = isConf ? "speaker1" : "中文女";
   return `
     <section class="subsection">
       <h2>配音（TTS）</h2>
-      <p class="hint">可选。镜头视频出完后，按分镜对白（没有对白时用动作作旁白）合成预设音色配音，对齐镜头时长，并在拼接时混进成片。只用预设音色，不做声音克隆。</p>
+      <p class="hint">可选。默认走本机 Confucius4-TTS（server_local.py）。可用 speaker1 / speaker2 预设，或在分镜表里为角色上传<strong>已授权</strong>的参考 wav 做零样本克隆。超过 1024 字会自动分句拼接。CosyVoice 预设仍可选。</p>
       <div class="layout">
         <div>
           <label class="field">配音阶段
@@ -342,7 +347,7 @@ function ttsSettings(settings) {
           </label>
           <label class="field">提供方
             <select name="tts_provider" id="tts-provider">
-              ${ttsChoices().map((item) => `<option value="${esc(item.id)}" ${item.id === provider ? "selected" : ""}>${esc(item.label)}${item.cloning ? " · 未实现" : ""}</option>`).join("")}
+              ${ttsChoices().map((item) => `<option value="${esc(item.id)}" ${item.id === provider ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
             </select>
           </label>
           <p class="callout" id="tts-note">${esc(ttsNote(provider))}</p>
@@ -352,13 +357,24 @@ function ttsSettings(settings) {
               <option value="dialogue" ${settings.tts_text_mode === "dialogue" ? "selected" : ""}>只读对白，没有则跳过</option>
             </select>
           </label>
+          <label class="field">语种
+            <select name="tts_lang">
+              ${[["zh","中文"],["en","English"],["ja","日本語"],["ko","한국어"]].map(([id,label]) => `<option value="${id}" ${(settings.tts_lang || "zh") === id ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">服务不可用时回退本地占位
+            <select name="tts_fallback_local">
+              <option value="true" ${settings.tts_fallback_local !== false ? "selected" : ""}>开启</option>
+              <option value="false" ${settings.tts_fallback_local === false ? "selected" : ""}>关闭，直接失败</option>
+            </select>
+          </label>
         </div>
         <div>
-          <label class="field">CosyVoice 地址
-            <input name="tts_url" type="text" value="${esc(settings.tts_url || "http://127.0.0.1:50000")}" ${needsUrl ? "" : "disabled"}>
+          <label class="field">服务地址（Confucius4 默认 7860）
+            <input name="tts_url" type="text" value="${esc(settings.tts_url || urlDefault)}" ${needsUrl ? "" : "disabled"}>
           </label>
-          <label class="field">音色 / 说话人
-            <input name="tts_voice" type="text" list="tts-voice-list" value="${esc(settings.tts_voice || "中文女")}" ${cloning ? "disabled" : ""}>
+          <label class="field">默认音色 / 旁白
+            <input name="tts_voice" type="text" list="tts-voice-list" value="${esc(settings.tts_voice || voiceDefault)}">
             <datalist id="tts-voice-list">${voices.map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join("")}</datalist>
           </label>
           <label class="field">语速（0.5–2.0）
@@ -366,6 +382,18 @@ function ttsSettings(settings) {
           </label>
           <label class="field">音量（0–2.0）
             <input name="tts_volume" type="number" min="0" max="2" step="0.1" value="${esc(settings.tts_volume ?? 1)}">
+          </label>
+          <label class="field">Confucius4 目录（子进程模式 / 解析 speaker 预设）
+            <input name="tts_confucius_dir" type="text" value="${esc(settings.tts_confucius_dir || "")}" placeholder="D:\\WorkSection\\AI Git projects\\Confucius4-TTS">
+          </label>
+          <label class="field">Confucius4 Python（可选，默认目录下 .venv）
+            <input name="tts_confucius_python" type="text" value="${esc(settings.tts_confucius_python || "")}" placeholder=".venv\\Scripts\\python.exe">
+          </label>
+          <label class="field">按需启动子进程（用完结束以释放显存）
+            <select name="tts_subprocess">
+              <option value="false" ${settings.tts_subprocess ? "" : "selected"}>关闭，手动运行 server_local.py</option>
+              <option value="true" ${settings.tts_subprocess ? "selected" : ""}>开启，TTS 阶段自动启停</option>
+            </select>
           </label>
         </div>
       </div>
@@ -551,6 +579,10 @@ function paintGpu(project) {
   if (queue.length) {
     body += `<div class="gpu-card queue"><strong>等待中 ${queue.length}</strong><span>${queue.map((item) => `${esc(item.family_label)}（${esc(item.project_id)}）`).join(" → ")}</span></div>`;
   }
+  const conf = res.confucius;
+  if (conf) {
+    body += `<div class="gpu-card ${conf.ok ? "idle" : "wait"}"><strong>Confucius4</strong><span>${esc(conf.detail || (conf.ok ? "就绪" : "未连接"))}</span></div>`;
+  }
   host.innerHTML = body;
 }
 
@@ -721,8 +753,10 @@ function drawEditor() {
         ["名字", "name", "text"],
         ["外形", "appearance", "area"],
         ["参考提示", "ref_prompt", "area"],
-        ["声线", "voice_note", "text"],
-      ], () => ({ id: "c_" + Date.now().toString().slice(-4), name: "", appearance: "", ref_prompt: "", voice_note: "", ref_image: "" }))}
+        ["声线备注", "voice_note", "text"],
+        ["预设音色", "voice_preset", "text"],
+      ], () => ({ id: "c_" + Date.now().toString().slice(-4), name: "", appearance: "", ref_prompt: "", voice_note: "", voice_preset: "speaker1", voice_ref: "", voice_ref_authorized: false, ref_image: "" }))}
+      ${voiceUploadBlock()}
       ${tableBlock("场景", "scenes", [
         ["id", "id", "text"],
         ["名字", "name", "text"],
@@ -747,6 +781,23 @@ function drawEditor() {
         ["运动提示", "motion_prompt", "area"],
       ], () => ({ shot_id: String((draft.shots || []).length + 1).padStart(3, "0"), duration_sec: 4, scene_id: "", characters: [], camera: "", action: "", dialogue: "", sfx: "", image_prompt: "", motion_prompt: "", status: "pending" }))}
     </section>`;
+}
+
+function voiceUploadBlock() {
+  const chars = (state.draft && state.draft.characters) || [];
+  if (!chars.length || !state.project) return "";
+  return `<div class="voice-panel">
+    <h2>角色参考音色（零样本克隆）</h2>
+    <p class="hint">仅接受你本人的声音，或你已获得明确授权的声音。本应用不提供任何名人音色。上传前必须勾选授权确认。</p>
+    ${chars.map((character) => `
+      <div class="voice-row" data-character="${esc(character.id)}">
+        <strong>${esc(character.name || character.id)}</strong>
+        <span class="hint">${character.voice_ref ? `已绑定 ${esc(character.voice_ref)}${character.voice_ref_authorized ? " · 已授权" : " · 未授权"}` : "使用预设 " + esc(character.voice_preset || "speaker1")}</span>
+        <label class="auth"><input type="checkbox" data-auth="${esc(character.id)}"> 我确认拥有该声音的使用授权（本人或已获授权，非名人）</label>
+        <label class="btn">上传 wav<input type="file" accept=".wav,audio/wav" data-voice-upload="${esc(character.id)}" hidden></label>
+        ${character.voice_ref ? `<button type="button" data-action="clear-voice" data-character="${esc(character.id)}">清除参考音</button>` : ""}
+      </div>`).join("")}
+  </div>`;
 }
 
 function tableBlock(title, key, columns, factory) {
@@ -915,6 +966,8 @@ async function saveSettings(form) {
   data.rewrite_enabled = data.rewrite_enabled === "true";
   data.rewrite_review = data.rewrite_review === "true";
   data.tts_enabled = data.tts_enabled === "true";
+  data.tts_fallback_local = data.tts_fallback_local === "true";
+  data.tts_subprocess = data.tts_subprocess === "true";
   data.serial_mode = data.serial_mode === "true";
   data.tts_speed = Number(data.tts_speed || 1);
   data.tts_volume = Number(data.tts_volume || 1);
@@ -1029,6 +1082,12 @@ main.addEventListener("click", async (event) => {
       state.draft[button.dataset.key] = state.draft[button.dataset.key] || [];
       state.draft[button.dataset.key].push(factory ? factory() : {});
       drawEditor();
+    } else if (action === "clear-voice") {
+      const characterId = button.dataset.character;
+      const data = await api(`/api/projects/${state.project.id}/voices/${encodeURIComponent(characterId)}`, { method: "DELETE" });
+      state.project = data.project;
+      state.draft = structuredClone(state.project.storyboard);
+      drawEditor();
     } else if (action === "del-row") {
       readDraftFromDom();
       state.draft[button.dataset.key].splice(Number(button.dataset.index), 1);
@@ -1057,8 +1116,33 @@ main.addEventListener("submit", async (event) => {
   }
 });
 
-main.addEventListener("change", (event) => {
+main.addEventListener("change", async (event) => {
   if (event.target.id === "script-file") readFile(event.target.files[0]);
+  const voiceInput = event.target.closest("[data-voice-upload]");
+  if (voiceInput && voiceInput.files && voiceInput.files[0]) {
+    const characterId = voiceInput.dataset.voiceUpload;
+    const auth = document.querySelector(`[data-auth="${CSS.escape(characterId)}"]`);
+    if (!auth || !auth.checked) {
+      alert("请先勾选「我确认拥有该声音的使用授权」。");
+      voiceInput.value = "";
+      return;
+    }
+    const body = new FormData();
+    body.append("character_id", characterId);
+    body.append("authorized", "true");
+    body.append("file", voiceInput.files[0]);
+    try {
+      const response = await fetch(`/api/projects/${state.project.id}/voices`, { method: "POST", body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "上传失败");
+      state.project = data.project;
+      state.draft = structuredClone(data.project.storyboard);
+      drawEditor();
+    } catch (err) {
+      alert(err.message);
+    }
+    voiceInput.value = "";
+  }
   if (event.target.name === "video_workflow") {
     const note = document.getElementById("vram-note");
     if (note) note.textContent = videoNote(event.target.value);
@@ -1070,8 +1154,12 @@ main.addEventListener("change", (event) => {
     const url = document.querySelector("input[name=tts_url]");
     const voice = document.querySelector("input[name=tts_voice]");
     const list = document.getElementById("tts-voice-list");
-    if (url) url.disabled = !(found && found.needs_url);
-    if (voice) voice.disabled = !!(found && found.cloning);
+    if (url) {
+      url.disabled = !(found && found.needs_url);
+      if (event.target.value === "confucius4" && (!url.value || url.value.includes(":50000"))) url.value = "http://127.0.0.1:7860";
+      if (event.target.value === "cosyvoice" && (!url.value || url.value.includes(":7860"))) url.value = "http://127.0.0.1:50000";
+    }
+    if (voice && event.target.value === "confucius4" && (voice.value === "中文女" || !voice.value)) voice.value = "speaker1";
     if (list && found) list.innerHTML = (found.voices || []).map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join("");
   }
   if (event.target.id === "rewrite-variant") {

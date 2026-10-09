@@ -94,6 +94,9 @@ def normalize_storyboard(
                 "appearance": appearance,
                 "ref_prompt": _clip(raw.get("ref_prompt") or appearance),
                 "voice_note": _clip(raw.get("voice_note"), 200),
+                "voice_preset": _clip(raw.get("voice_preset") or "speaker1", 32) or "speaker1",
+                "voice_ref": _clip(raw.get("voice_ref"), 300),
+                "voice_ref_authorized": bool(raw.get("voice_ref_authorized")),
                 "ref_image": _clip(raw.get("ref_image"), 300),
             }
         )
@@ -238,6 +241,9 @@ def _heuristic(script: str, style: str) -> dict:
                 "appearance": "与章节描述一致的主角，服装和脸部在全章保持一致",
                 "ref_prompt": "story protagonist, consistent face and costume, full body character sheet",
                 "voice_note": "",
+                "voice_preset": "speaker1",
+                "voice_ref": "",
+                "voice_ref_authorized": False,
             }
         ],
         "scenes": [{"id": "s1", "name": "章节主场景", "visual": paragraphs[0][:180]}],
