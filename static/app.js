@@ -3,6 +3,7 @@ const STAGE_LABELS = {
   stage1: "分镜结构化",
   stage2: "参考图",
   stage3: "镜头关键帧",
+  stage3r: "H3 提示词改写",
   stage4: "镜头视频",
   stage5: "拼接成片",
   stage6: "完成",
@@ -12,6 +13,7 @@ const STATUS_TEXT = {
   idle: "未开始",
   running: "进行中",
   awaiting_approval: "待确认",
+  awaiting_prompt_review: "待确认提示词",
   done: "已完成",
   failed: "失败",
   cancelled: "已停止",
@@ -108,7 +110,7 @@ function closeStream() {
 }
 
 function statusChip(status) {
-  const kind = status === "running" ? "run" : status === "done" ? "done" : status === "failed" ? "bad" : status === "awaiting_approval" ? "wait" : "";
+  const kind = status === "running" ? "run" : status === "done" ? "done" : status === "failed" ? "bad" : String(status || "").startsWith("awaiting") ? "wait" : "";
   return `<span class="chip ${kind}">${esc(STATUS_TEXT[status] || status || "")}</span>`;
 }
 
@@ -118,6 +120,30 @@ function videoChoices() {
     { id: "h3_r2v", label: "MiniMax H3 参考生视频" },
     { id: "wan22", label: "Wan2.2 图生视频（低显存）" },
   ];
+}
+
+const SOURCE_TEXT = {
+  rewriter: "已改写",
+  demo: "演示改写",
+  manual: "手动修改",
+  fallback: "沿用原文",
+};
+
+function rewriteChoices() {
+  return (state.workflows && state.workflows.rewrite) || [];
+}
+
+function rewriteNote(id) {
+  const found = rewriteChoices().find((item) => item.id === id);
+  return found ? `显存 ${found.vram}。${found.note}` : "";
+}
+
+function isH3(project) {
+  return ["h3_i2v", "h3_r2v"].includes(project.video_workflow || "h3_i2v");
+}
+
+function stageNumber(key) {
+  return key === "stage3r" ? "3.5" : key.replace("stage", "");
 }
 
 function videoNote(id) {
@@ -254,6 +280,7 @@ async function renderSettings() {
           </label>
         </div>
       </div>
+      ${rewriteSettings(settings)}
       <div class="row">
         <button class="primary" type="submit">保存设置</button>
         <span class="hint" id="settings-msg"></span>
@@ -263,11 +290,53 @@ async function renderSettings() {
   if (state.services) paintChecks(state.services);
 }
 
+function rewriteSettings(settings) {
+  const variant = settings.rewrite_variant || "8b";
+  const noAdapter = variant === "writer";
+  return `
+    <section class="subsection">
+      <h2>H3 提示词改写</h2>
+      <p class="hint">可选。在关键帧之后、MiniMax H3 生成视频之前，用 ComfyUI 节点 minimax-h3-prompt-rewriter 把每镜的短提示词改写成 H3 的三段式英文提示词（画面与声音描述、环境音、配乐）。画幅和时长取自镜头。节点没装或改写失败时，会记一条警告并沿用原始提示词。Wan2.2 分支不改写。</p>
+      <div class="layout">
+        <div>
+          <label class="field">改写阶段
+            <select name="rewrite_enabled">
+              <option value="false" ${settings.rewrite_enabled ? "" : "selected"}>关闭，直接用原始提示词</option>
+              <option value="true" ${settings.rewrite_enabled ? "selected" : ""}>开启，生成视频前改写</option>
+            </select>
+          </label>
+          <label class="field">改写模型
+            <select name="rewrite_variant" id="rewrite-variant">
+              ${rewriteChoices().map((item) => `<option value="${esc(item.id)}" ${item.id === variant ? "selected" : ""}>${esc(item.label)}${item.id === "8b" ? " · 推荐" : ""}</option>`).join("")}
+            </select>
+          </label>
+          <p class="callout" id="rewrite-note">${esc(rewriteNote(variant))}</p>
+          <label class="field">改写后人工确认
+            <select name="rewrite_review">
+              <option value="true" ${settings.rewrite_review !== false ? "selected" : ""}>暂停，逐镜确认后再生成视频</option>
+              <option value="false" ${settings.rewrite_review === false ? "selected" : ""}>不暂停，改写完直接生成</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label class="field">模型（下拉名或文件名）
+            <input name="rewrite_model" type="text" value="${esc(settings.rewrite_model || "")}" placeholder="留空用工作流里的默认，例如 Qwen3-VL-8B-Instruct-Q4_K_M.gguf">
+          </label>
+          <label class="field">适配器 LoRA
+            <input name="rewrite_adapter" id="rewrite-adapter" type="text" value="${esc(settings.rewrite_adapter || "")}" ${noAdapter ? "disabled" : ""} placeholder="${noAdapter ? "Writer 不用适配器" : "留空用 lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA"}">
+          </label>
+          <p class="hint">填的名字会和 ComfyUI 下拉里的选项比对，大小写和文件后缀都不要紧。模型放在 ComfyUI/models/LLM。</p>
+        </div>
+      </div>
+    </section>`;
+}
+
 function paintChecks(result) {
   const host = document.getElementById("check-result");
   if (!host || !result) return;
   const line = (item, title) => `<p class="check-line ${item && item.ok ? "ok" : "bad"}">${title}：${esc(item ? item.detail : "没有结果")}</p>`;
-  host.innerHTML = line(result.ollama, "Ollama") + line(result.comfy, "ComfyUI") + line(result.ffmpeg, "FFmpeg");
+  host.innerHTML = line(result.ollama, "Ollama") + line(result.comfy, "ComfyUI") + line(result.ffmpeg, "FFmpeg")
+    + (result.rewriter ? line(result.rewriter, "H3 改写节点") : "");
 }
 
 function runSkeleton() {
@@ -306,10 +375,10 @@ function paintRun(project, rebuildEditor) {
   const stageSig = JSON.stringify(project.stages || {});
   if (stageHost.dataset.sig !== stageSig) {
     stageHost.dataset.sig = stageSig;
-    stageHost.innerHTML = Object.keys(STAGE_LABELS).map((key, index) => {
+    stageHost.innerHTML = Object.keys(STAGE_LABELS).map((key) => {
     const stage = (project.stages && project.stages[key]) || { status: "pending", message: "" };
     return `<article class="stage ${esc(stage.status)}">
-      <div class="k"><span>阶段 ${index}</span><i class="lamp"></i></div>
+      <div class="k"><span>阶段 ${stageNumber(key)}</span><i class="lamp"></i></div>
       <strong>${esc(STAGE_LABELS[key])}</strong>
       <em>${esc(STATUS_TEXT[stage.status] || stage.status)}${stage.message ? " · " + esc(stage.message) : ""}</em>
     </article>`;
@@ -335,13 +404,21 @@ function actionButtons(project) {
     return `<button class="primary" data-action="continue" data-id="${esc(id)}">确认并继续</button>
       <button data-action="rerun" data-id="${esc(id)}" data-from="stage1">重新分镜</button>`;
   }
+  if (project.status === "awaiting_prompt_review") {
+    return `<button class="primary" data-action="continue-prompts" data-id="${esc(id)}">确认提示词并生成视频</button>
+      <button data-action="rerun" data-id="${esc(id)}" data-from="stage3r">重新改写</button>`;
+  }
+  const rewriteAgain = state.settings && state.settings.rewrite_enabled && isH3(project) && project.storyboard
+    ? `<button data-action="rerun" data-id="${esc(id)}" data-from="stage3r">从改写重跑</button>` : "";
   if (project.status === "failed") {
     return `<button class="primary" data-action="retry" data-id="${esc(id)}">重试失败阶段</button>
+      ${rewriteAgain}
       <button data-action="rerun" data-id="${esc(id)}" data-from="stage0">从头重跑</button>
       <a class="btn" href="#/gallery/${esc(id)}">画廊</a>`;
   }
   if (project.status === "done") {
     return `<a class="btn primary" href="#/gallery/${esc(id)}">打开画廊</a>
+      ${rewriteAgain}
       <button data-action="rerun" data-id="${esc(id)}" data-from="stage0">从头重跑</button>`;
   }
   return `<button class="primary" data-action="rerun" data-id="${esc(id)}" data-from="stage0">开始生成</button>`;
@@ -351,6 +428,7 @@ function banners(project) {
   const bits = [];
   if (state.settings && state.settings.demo_mode) bits.push(`<div class="banner">演示模式：参考图和镜头视频是本地占位，用来看进度。关掉后才会提交 ComfyUI。</div>`);
   if (project.status === "awaiting_approval") bits.push(`<div class="banner">分镜可以改。确认后才会出参考图、关键帧和视频。</div>`);
+  if (project.status === "awaiting_prompt_review") bits.push(`<div class="banner">H3 提示词已改写。左边是原始提示词，右边可以直接改；清空某一镜就沿用原文。确认后才开始生成视频。</div>`);
   if (project.status === "failed" && project.error) bits.push(`<div class="banner bad">${esc(project.error)}</div>`);
   if (project.video_workflow === "wan22") bits.push(`<div class="banner">这条片子走 Wan2.2 低显存分支，工作流是 03c。</div>`);
   return bits.join("");
@@ -359,7 +437,7 @@ function banners(project) {
 function paintShots(project) {
   const host = document.getElementById("shots");
   const shots = (project.storyboard && project.storyboard.shots) || [];
-  const signature = JSON.stringify(shots.map((shot) => [shot.shot_id, shot.status, shot.keyframe, shot.video, shot.action, shot.dialogue]));
+  const signature = JSON.stringify(shots.map((shot) => [shot.shot_id, shot.status, shot.keyframe, shot.video, shot.action, shot.dialogue, shot.h3_prompt, shot.h3_prompt_source]));
   if (host.dataset.sig === signature) return;
   host.dataset.sig = signature;
   const open = new Set([...host.querySelectorAll("details[open]")].map((node) => node.dataset.id));
@@ -390,8 +468,24 @@ function paintShots(project) {
           <p>${esc(shot.motion_prompt || "")}</p>
         </div>
       </div>
+      ${promptCompare(shot)}
     </details>`;
   }).join("");
+}
+
+function sourceChip(shot) {
+  const source = shot.h3_prompt_source || "";
+  const kind = source === "fallback" ? "bad" : source === "manual" ? "wait" : "done";
+  return `<span class="chip ${kind}" title="${esc(shot.h3_prompt_note || "")}">${esc(SOURCE_TEXT[source] || source)}</span>`;
+}
+
+function promptCompare(shot) {
+  if (!shot.h3_prompt) return "";
+  return `<div class="compare">
+      <div><div class="compare-head">原始提示词</div><pre>${esc(shot.h3_prompt_original || "")}</pre></div>
+      <div><div class="compare-head">H3 改写 ${sourceChip(shot)}</div><pre>${esc(shot.h3_prompt)}</pre>
+      ${shot.h3_prompt_source === "fallback" && shot.h3_prompt_note ? `<p class="hint">${esc(shot.h3_prompt_note)}</p>` : ""}</div>
+    </div>`;
 }
 
 function mediaUrl(project, rel) {
@@ -428,6 +522,14 @@ function paintLogs(project) {
 
 function paintEditor(project, rebuild) {
   const host = document.getElementById("editor-host");
+  if (project.status === "awaiting_prompt_review" && project.storyboard) {
+    const key = `${project.id}:prompts`;
+    if (!rebuild && state.editorKey === key && host.childElementCount) return;
+    state.editorKey = key;
+    state.draft = null;
+    drawPromptReview(project);
+    return;
+  }
   if (project.status !== "awaiting_approval" || !project.storyboard) {
     host.innerHTML = "";
     state.editorKey = "";
@@ -440,6 +542,26 @@ function paintEditor(project, rebuild) {
   state.draft.style = project.style || state.draft.style;
   state.draft.aspect = project.aspect || state.draft.aspect;
   drawEditor();
+}
+
+function drawPromptReview(project) {
+  const host = document.getElementById("editor-host");
+  const shots = (project.storyboard.shots || []).filter((shot) => shot.h3_prompt || shot.h3_prompt_original);
+  host.innerHTML = `
+    <section class="card editor">
+      <h2>确认 H3 提示词</h2>
+      ${shots.length ? shots.map((shot) => `
+        <div class="review">
+          <div class="review-head"><span class="shot-no">${esc(shot.shot_id)}</span><span>${esc(shot.duration_sec || "")} 秒 · ${esc(project.aspect || "")}</span>${sourceChip(shot)}</div>
+          <div class="compare">
+            <div><div class="compare-head">原始提示词</div><pre>${esc(shot.h3_prompt_original || "")}</pre></div>
+            <div><div class="compare-head">送进 H3 的提示词</div>
+              <textarea data-prompt="${esc(shot.shot_id)}" rows="8">${esc(shot.h3_prompt || "")}</textarea>
+              <button type="button" data-action="reset-prompt" data-shot="${esc(shot.shot_id)}">恢复原始</button>
+            </div>
+          </div>
+        </div>`).join("") : `<p class="empty">没有可确认的提示词。</p>`}
+    </section>`;
 }
 
 function drawEditor() {
@@ -650,6 +772,9 @@ async function createProject(form) {
 async function saveSettings(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   data.demo_mode = data.demo_mode === "true";
+  data.rewrite_enabled = data.rewrite_enabled === "true";
+  data.rewrite_review = data.rewrite_review === "true";
+  if (data.rewrite_variant === "writer") delete data.rewrite_adapter;
   state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(data) });
   const msg = document.getElementById("settings-msg");
   if (msg) msg.textContent = "已保存";
@@ -722,6 +847,20 @@ main.addEventListener("click", async (event) => {
       });
       state.editorKey = "";
       paintRun(state.project, true);
+    } else if (action === "continue-prompts") {
+      button.disabled = true;
+      const prompts = {};
+      document.querySelectorAll("[data-prompt]").forEach((node) => { prompts[node.dataset.prompt] = node.value; });
+      state.project = await api(`/api/projects/${button.dataset.id}/continue`, {
+        method: "POST",
+        body: JSON.stringify({ prompts }),
+      });
+      state.editorKey = "";
+      paintRun(state.project, true);
+    } else if (action === "reset-prompt") {
+      const shot = ((state.project && state.project.storyboard && state.project.storyboard.shots) || []).find((item) => item.shot_id === button.dataset.shot);
+      const area = [...document.querySelectorAll("[data-prompt]")].find((node) => node.dataset.prompt === button.dataset.shot);
+      if (shot && area) area.value = shot.h3_prompt_original || "";
     } else if (action === "rerun") {
       button.disabled = true;
       state.editorKey = "";
@@ -779,6 +918,15 @@ main.addEventListener("change", (event) => {
   if (event.target.name === "video_workflow") {
     const note = document.getElementById("vram-note");
     if (note) note.textContent = videoNote(event.target.value);
+  }
+  if (event.target.id === "rewrite-variant") {
+    const note = document.getElementById("rewrite-note");
+    if (note) note.textContent = rewriteNote(event.target.value);
+    const adapter = document.getElementById("rewrite-adapter");
+    if (adapter) {
+      adapter.disabled = event.target.value === "writer";
+      adapter.placeholder = adapter.disabled ? "Writer 不用适配器" : "留空用 lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA";
+    }
   }
 });
 
