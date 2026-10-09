@@ -16,7 +16,15 @@ from typing import Any
 WIDGET_TYPES = {"STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"}
 SKIP_NODE_TYPES = {"MarkdownNote", "Note", "Note Plus (mtb)"}
 DENY_WIDGETS = {"control_after_generate", "upload", "fixed", "videopreview", "preview"}
-OUTPUT_CLASSES = {"SaveImage", "SaveImageAdvanced", "SaveVideo", "PreviewImage", "SaveAnimatedWEBP"}
+OUTPUT_CLASSES = {
+    "SaveImage",
+    "SaveImageAdvanced",
+    "SaveVideo",
+    "PreviewImage",
+    "SaveAnimatedWEBP",
+    "PreviewAny",
+    "SaveText",
+}
 
 # Widget order for templates that store widgets_values as a flat list.
 # ``skip`` entries are UI-only controls and are not sent to the API.
@@ -92,6 +100,66 @@ WIDGET_SPECS: dict[str, list[tuple[str, Any]]] = {
         ("length", int),
         ("ref_image_size", str),
     ],
+    # minimax-h3-prompt-rewriter (pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI):
+    # required widgets in INPUT_TYPES order, then the optional widget inputs.
+    "MiniMaxH3PromptWriter8B": [
+        ("prompt", str),
+        ("model", str),
+        ("task", str),
+        ("resolution", str),
+        ("duration", float),
+        ("quantization", str),
+        ("greedy", bool),
+        ("seed", int),
+        ("control_after_generate", SKIP),
+        ("keep_model_loaded", bool),
+        ("aspect_ratio", str),
+        ("bypass", bool),
+        ("repeat_last", bool),
+        ("library_pick", str),
+    ],
+    "MiniMaxH3PromptRewriter": [
+        ("prompt", str),
+        ("model", str),
+        ("resolution", str),
+        ("duration", float),
+        ("quantization", str),
+        ("greedy", bool),
+        ("seed", int),
+        ("control_after_generate", SKIP),
+        ("keep_model_loaded", bool),
+        ("aspect_ratio", str),
+        ("bypass", bool),
+        ("repeat_last", bool),
+        ("library_pick", str),
+    ],
+    "MiniMaxH3GuidedWriter": [
+        ("prompt", str),
+        ("model", str),
+        ("task", str),
+        ("resolution", str),
+        ("duration", float),
+        ("greedy", bool),
+        ("seed", int),
+        ("control_after_generate", SKIP),
+        ("keep_model_loaded", bool),
+        ("aspect_ratio", str),
+        ("reference_material", str),
+        ("bypass", bool),
+        ("system_prompt", str),
+        ("repeat_last", bool),
+        ("library_pick", str),
+    ],
+    "MiniMaxH3RewriterOptions": [
+        ("max_new_tokens", int),
+        ("temperature", float),
+        ("top_p", float),
+        ("top_k", int),
+        ("repetition_penalty", float),
+        ("attn_implementation", str),
+        ("adapter", str),
+    ],
+    "PreviewAny": [("preview", SKIP)],
 }
 
 

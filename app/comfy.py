@@ -122,6 +122,17 @@ class ComfyClient:
         timeout: float = 3600,
         should_stop: Callable[[], bool] | None = None,
     ) -> list[dict]:
+        outputs = await self.queue_and_wait_outputs(prompt, log, timeout, should_stop)
+        return collect_files(outputs)
+
+    async def queue_and_wait_outputs(
+        self,
+        prompt: dict,
+        log: LogFn,
+        timeout: float = 3600,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Queue a prompt and return the ``outputs`` block of its history entry."""
         client_id = str(uuid.uuid4())
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -155,7 +166,7 @@ class ComfyClient:
                     if status.get("status_str") == "error":
                         messages = status.get("messages") or status
                         raise ComfyError("ComfyUI 执行失败：" + json.dumps(messages, ensure_ascii=False)[:1200])
-                    return collect_files(entry.get("outputs") or {})
+                    return entry.get("outputs") or {}
                 await asyncio.sleep(1.5)
             raise ComfyError(f"等待 ComfyUI 超时（{int(timeout)} 秒）prompt_id={prompt_id}")
         finally:
