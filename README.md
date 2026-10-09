@@ -9,6 +9,7 @@
 阶段 1  Ollama 文本模型 → 角色 / 场景 / 道具 / 镜头 JSON，可改完再继续
 阶段 2  ComfyUI · Qwen-Image-2.1 文生图 → 定妆、场景、道具参考图
 阶段 3  ComfyUI · Qwen-Image-2.1 图像编辑（多参考）→ 每镜关键帧
+阶段 3.5 （可选）ComfyUI · MiniMax-H3 Prompt Rewriter → 每镜改写成 H3 结构化提示词
 阶段 4  ComfyUI · MiniMax H3 图生视频（默认）
         或 H3 参考生视频，或低显存 Wan2.2（工作流 03c）
 阶段 5  FFmpeg 统一分辨率后拼接
@@ -100,6 +101,88 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 43123
 - `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
 - `wan_2.1_vae.safetensors`
 
+## H3 提示词改写（可选）/ H3 prompt rewrite (optional)
+
+**中文**
+
+MiniMax H3 是用结构化英文提示词训练的：`integrated_multimodal_description`（画面、动作、对白，按时间码）、`overall_soundscape`（环境音）、`non_diegetic_music`（配乐）。分镜里每镜只有一句短提示词，直接喂给 H3 效果一般。打开这个阶段后，关键帧出完（阶段 3）、提交 H3 视频（阶段 4）之前，程序会用 ComfyUI 节点包 [MiniMax-H3-Prompt-Rewriter-ComfyUI](https://github.com/pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI) 把每镜改写成这种格式。画幅和时长取自镜头本身。
+
+默认关闭。到 **设置 → H3 提示词改写** 里打开，再选一个改写模型：
+
+| 选项 | 节点 | 基础模型 | 显存（约） | 看关键帧 |
+|------|------|----------|------------|----------|
+| **Rewriter 8B**（推荐） | `MiniMaxH3PromptWriter8B` | Qwen3-VL-8B-Instruct GGUF Q4_K_M + 8B LoRA | **9 GB** | 是，I2VA（仅 H3 图生视频分支） |
+| Rewriter 27B | `MiniMaxH3PromptRewriter` | Qwen3.6-27B GGUF UD-IQ2_M + LoRA | **13 GB**（Q4_K_M 约 19 GB） | 否，纯文本 |
+| Writer | `MiniMaxH3GuidedWriter` | 任意 GGUF，默认 Qwen3.5-4B Q4_K_M | **5 GB** | 否，纯文本，不用 LoRA |
+
+改写模型和 H3 不会同时占显存：改写节点按 `keep_model_loaded=false` 提交，跑完就卸载。
+
+**安装节点**
+
+1. ComfyUI Manager → *Custom Nodes Manager* → 搜索 `minimax-h3-prompt-rewriter` → 安装 → 重启 ComfyUI。
+   也可以用 registry：`comfy node install minimax-h3-prompt-rewriter`。
+2. 或者手动：
+   ```bash
+   cd ComfyUI/custom_nodes
+   git clone https://github.com/pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI
+   pip install -r MiniMax-H3-Prompt-Rewriter-ComfyUI/requirements.txt
+   ```
+   GGUF 模型需要 `llama-cpp-python`（带 CUDA 的轮子）。
+3. 回到本程序设置页，点「检测连接」。开着改写时会多一行「H3 改写节点」，列出缺哪些节点。
+
+**模型下载**
+
+节点第一次运行时会自己从 Hugging Face 下载，放进 `ComfyUI/models/LLM/`。离线机器可以先手动下好放进去：
+
+| 用途 | Hugging Face 仓库 | 文件 |
+|------|-------------------|------|
+| 8B 基础模型 | `Qwen/Qwen3-VL-8B-Instruct-GGUF` | `Qwen3VL-8B-Instruct-Q4_K_M.gguf`（5.4 GB） |
+| 8B 适配器 | `lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA-8B`，GGUF 版 `pytraveler/MiniMax-H3-Prompt-Rewriter-LoRA-8B-GGUF` | `MiniMax-H3-Prompt-Rewriter-LoRA-8B-F16.gguf` |
+| 27B 基础模型 | `unsloth/Qwen3.6-27B-GGUF` | `Qwen3.6-27B-UD-IQ2_M.gguf`（10.1 GB），或 `Qwen3.6-27B-Q4_K_M.gguf`（15.7 GB） |
+| 27B 适配器 | `lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA`，GGUF 版 `pytraveler/MiniMax-H3-Prompt-Rewriter-LoRA-GGUF` | `MiniMax-H3-Prompt-Rewriter-LoRA-F16.gguf` |
+| Writer | `unsloth/Qwen3.5-4B-GGUF` | `Qwen3.5-4B-Q4_K_M.gguf`（2.6 GB） |
+
+设置里的「模型」和「适配器」两栏可以留空（用工作流里的默认），也可以填下拉里的名字或文件名。程序会读 `/object_info`，按名字或文件名片段匹配下拉选项；找不到时会写一条警告并用默认值。
+
+**工作流**
+
+| 文件 | 改写模型 |
+|------|----------|
+| `workflows/04a_h3_rewrite_8b.json` | Rewriter 8B（`LoadImage` → `first_frame`，`MiniMaxH3RewriterOptions` → `options`） |
+| `workflows/04b_h3_rewrite_27b.json` | Rewriter 27B |
+| `workflows/04c_h3_writer.json` | Writer |
+
+它们和其他模板一样是界面格式，提交前摊平成 API 格式。程序会注入提示词（原始提示词加机位和动作）、`resolution` / `aspect_ratio`（镜头画幅）、`duration`（镜头秒数）、种子，以及 I2VA / T2VA。`rewritten_prompt` 接到 ComfyUI 自带的 `PreviewAny` 节点，程序从 `/history` 的 `outputs[节点]["text"]` 读回文字。
+
+**运行页**
+
+- 阶段条里多一个「阶段 3.5 · H3 提示词改写」。
+- 每个镜头卡片里能对照看「原始提示词」和「H3 改写」，标签会写出来源：已改写、演示改写、手动修改、沿用原文。
+- 「改写后人工确认」默认开：改写完会停在「待确认提示词」，每镜一个文本框，可以直接改，「恢复原始」一键还原，清空也等于沿用原文。点「确认提示词并生成视频」才进阶段 4。手动改过的镜头，旧视频会删掉重出。
+- 完成或失败后可以点「从改写重跑」。
+
+**退回原始提示词**
+
+以下情况会写一条警告，并把原始提示词原样交给 H3，不会让整条片子失败：
+
+- `/object_info` 里没有所选改写节点、`MiniMaxH3RewriterOptions` 或 `PreviewAny`
+- 单个镜头改写报错、超时，或节点没返回文字
+
+视频分支选 Wan2.2 时整个阶段跳过。参考生视频分支没有首帧，8B 会按 T2VA 只读文字。
+
+**演示模式** 不调用 ComfyUI，会生成一段同样三段式的模拟改写，用来走通对照和确认界面。
+
+**English**
+
+MiniMax H3 was trained on structured English prompts with three sections: `integrated_multimodal_description`, `overall_soundscape` and `non_diegetic_music`. When this optional stage is on, it runs after keyframes (stage 3) and before H3 video generation (stage 4). It uses the ComfyUI node pack [MiniMax-H3-Prompt-Rewriter-ComfyUI](https://github.com/pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI) to rewrite each shot's short prompt into that format, and takes the aspect ratio and duration from the shot.
+
+- **Enable:** go to *Settings → H3 提示词改写* and set it to on (it is off by default). Then pick a variant: **Rewriter 8B** (Qwen3-VL-8B, about 9 GB VRAM, sees the keyframe, recommended), **Rewriter 27B** (Qwen3.6-27B UD-IQ2_M, about 13 GB, text only) or **Writer** (any GGUF, about 5 GB with Qwen3.5-4B, no adapter). The *model* and *adapter* fields are optional. They are matched against the node's dropdown options from `/object_info`, by label or by filename fragment.
+- **Install:** in ComfyUI Manager, search for `minimax-h3-prompt-rewriter`, or run `comfy node install minimax-h3-prompt-rewriter`. To install manually, `git clone` the repo into `ComfyUI/custom_nodes` and `pip install -r requirements.txt` (GGUF models need `llama-cpp-python`). Restart ComfyUI, then click *检测连接* (check connections) in Settings.
+- **Models:** the nodes download into `ComfyUI/models/LLM/` on first use. For offline machines, the repos and files are listed in the table above.
+- **Workflows:** `workflows/04a_h3_rewrite_8b.json`, `04b_h3_rewrite_27b.json` and `04c_h3_writer.json` are UI-format graphs. Like the other templates, they are flattened to API format at queue time. The rewritten text is wired into core `PreviewAny` and read back from `/history`.
+- **Review:** each shot card shows the original prompt next to the rewritten one. With *改写后人工确认* (review after rewrite) on, which is the default, the run pauses at *待确认提示词* (awaiting prompt review), so you can edit each prompt before stage 4. An empty box means "use the original".
+- **Fallback:** if a node is missing, or a single rewrite fails, the app logs a warning and sends the original prompt to H3. The stage is skipped on the Wan2.2 branch. Demo mode simulates the rewrite offline.
+
 ## 工作流
 
 `workflows/` 里是 Comfy 官方模板的 **界面格式**（带 subgraph），节点名来自这些文件，程序不会另造一套节点。
@@ -153,12 +236,15 @@ python scripts/stage1_llm_storyboard.py \
 
 低显存：开拍或设置里把视频工作流改成 **Wan2.2**。运行页会提示正在用 `03c`。
 
+试 H3 提示词改写：设置里打开「H3 提示词改写」（演示模式下也能开），重新开拍示例章节。阶段 3 之后会停在「待确认提示词」，对照原文改一镜，再点「确认提示词并生成视频」。
+
 ## 目录
 
 ```
 app/                 FastAPI、流水线、Comfy 转换与提交、FFmpeg
 static/              中文界面
-workflows/           01 文生图、02 编辑、03 H3 图生视频、03b H3 参考生视频、03c Wan2.2
+workflows/           01 文生图、02 编辑、03 H3 图生视频、03b H3 参考生视频、03c Wan2.2、
+                     04a/04b/04c H3 提示词改写（8B / 27B / Writer）
 prompts/stage1_storyboard.txt
 config/project.schema.json
 configs/example_chapter.json
@@ -175,10 +261,11 @@ pip install pytest
 pytest -q
 ```
 
-转换测试会把五个官方模板摊成 API 图，并检查提示词、参考图和负向提示有没有灌对。演示模式测试会在没有 Ollama / Comfy 的机器上跑完示例章节并得到 mp4。
+转换测试会把五个官方模板摊成 API 图，并检查提示词、参考图和负向提示有没有灌对。演示模式测试会在没有 Ollama / Comfy 的机器上跑完示例章节并得到 mp4。改写测试覆盖三个改写模板的摊平、下拉匹配、缺节点和失败时的回退、成功时读回文字，以及开着人工确认时手动改提示词、阶段 4 用上改过的文字。
 
 ## 许可
 
 - 编排代码和示例文稿可随这个项目使用
 - `workflows/*.json` 来自 [Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates)，遵循该仓库许可
+- `workflows/04*_h3_*.json` 用的是 [MiniMax-H3-Prompt-Rewriter-ComfyUI](https://github.com/pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI) 的节点，遵循该仓库许可
 - 模型权重遵循 Qwen、MiniMax、Comfy-Org 各自协议。H3 有地区和商用限制，商用前看官方说明
