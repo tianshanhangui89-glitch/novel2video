@@ -12,7 +12,8 @@
 阶段 3.5 （可选）ComfyUI · MiniMax-H3 Prompt Rewriter → 每镜改写成 H3 结构化提示词
 阶段 4  ComfyUI · MiniMax H3 图生视频（默认）
         或 H3 参考生视频，或低显存 Wan2.2（工作流 03c）
-阶段 5  FFmpeg 统一分辨率后拼接
+阶段 4.5 （可选）TTS 配音 → 每镜预设音色，对齐后混入成片
+阶段 5  FFmpeg 统一分辨率后拼接（可混配音）
 阶段 6  成片复制到输出目录
 ```
 
@@ -223,6 +224,52 @@ python scripts/stage1_llm_storyboard.py \
   --out configs/generated_ch01.json
 ```
 
+
+## 配音 TTS（可选）/ Voiceover TTS (optional)
+
+**中文**
+
+默认关闭。打开后，阶段 4 镜头视频出完，会按分镜文本合成配音，再进入拼接：
+
+1. 文本：优先用镜头 **对白**；没有对白时可用 **动作** 作短旁白（设置里可改成「只读对白」）。
+2. 对齐：若配音比视频长，用 FFmpeg 冻结尾帧把视频垫到配音时长，并更新 `duration_sec`；配音较短则在混音时补静音。
+3. 混音：阶段 5 把每镜 WAV 按设置的音量叠进对应镜头，再 concat 成片。
+
+**提供方（可插拔）**
+
+| id | 说明 |
+|----|------|
+| `cosyvoice` | 本机 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) FastAPI，**只用预训练音色**（中文女 / 中文男 / 英文女 / 英文男 / 日语男 / 粤语女）。默认地址 `http://127.0.0.1:50000`，调用 `POST /inference_sft`（`tts_text` + `spk_id`）。 |
+| `local` | 免安装回退。若 `PATH` 里有 `espeak-ng` / `espeak` 就用它；否则生成按时长估算的占位音，用来走通对齐和混音。 |
+| `clone` | **未实现的预留接口。** 将来只会支持用户本人的声音，或用户明确授权的声音；当前选它会报错，不会走任何 zero-shot / 参考音频路径。 |
+
+设置项：启用开关、提供方、CosyVoice URL、音色、语速（0.5–2）、音量（0–2）、朗读文本模式。运行页每镜可播放配音；演示模式会写占位 WAV，不连 CosyVoice。
+
+**English**
+
+Optional stage 4.5. Prefer shot **dialogue**, else a short **action** narration. Audio longer than the clip pads the video (freeze last frame); staging mixes each WAV into the FFmpeg cut. Providers: **CosyVoice** preset speakers only (configurable API URL), **local** offline fallback (espeak if present, else timed placeholder), and a clearly marked **clone stub** that refuses to run and documents authorized-voice-only future use. Demo mode simulates speech offline.
+
+## 低配串行 / Low-resource serial mode
+
+**中文**
+
+本机显存和内存有限时，Ollama、ComfyUI（出图 / H3 改写 / 视频）和配音 **不能同时占 GPU**。设置里的 **低配串行模式** 默认开启：
+
+- 进程内全局锁：同一时间只有一个「重模型」任务在跑；其它项目/阶段在队列里等。
+- 按阶段批处理，减少换模：先全部 LLM，再全部出图（参考图 + 关键帧同属 `image` 家族，中间不卸），再改写，再视频，再配音。
+- 换家族时释放显存：
+  - Ollama：对驻留模型 `POST /api/generate`，`keep_alive: 0`
+  - ComfyUI：`POST /free`，`unload_models` + `free_memory`（出图 ↔ 改写 ↔ 视频 之间也会 free）
+  - TTS：若提供方实现了 `release()` 则调用
+- 运行页顶部显示 **谁占用 GPU**、**本项目是否在排队**、**队列里还有谁**。`GET /api/resources` 可查同一快照。
+- 演示模式仍走锁（方便看排队），但跳过真实卸载请求。
+
+关掉串行后不再保证互斥，多任务可能把显存打爆。
+
+**English**
+
+**Low-resource serial mode** defaults to on. A process-wide GPU queue allows only one heavy family at a time (`llm` → `image` → `rewrite` → `video` → `tts`). Switching family unloads the previous one (Ollama `keep_alive=0`, ComfyUI `/free`, TTS `release` when supported). Stages batch work to minimise swaps; the run page shows the holder and queue. Demo mode keeps the lock for UI visibility but skips unload HTTP calls.
+
 ## 一章冒烟
 
 1. `./run.sh`，打开设置，点「检测连接」。
@@ -238,10 +285,12 @@ python scripts/stage1_llm_storyboard.py \
 
 试 H3 提示词改写：设置里打开「H3 提示词改写」（演示模式下也能开），重新开拍示例章节。阶段 3 之后会停在「待确认提示词」，对照原文改一镜，再点「确认提示词并生成视频」。
 
+试配音：设置里打开「配音」，提供方选「本地占位」或 CosyVoice，保存后重跑。阶段 4.5 会出 WAV，镜头卡片可播放，成片里能听到混音。低配串行保持默认开启；同时开两个项目时，运行页能看到 GPU 占用和排队。
+
 ## 目录
 
 ```
-app/                 FastAPI、流水线、Comfy 转换与提交、FFmpeg
+app/                 FastAPI、流水线、Comfy 转换与提交、FFmpeg、TTS、GPU 串行锁
 static/              中文界面
 workflows/           01 文生图、02 编辑、03 H3 图生视频、03b H3 参考生视频、03c Wan2.2、
                      04a/04b/04c H3 提示词改写（8B / 27B / Writer）
@@ -261,7 +310,7 @@ pip install pytest
 pytest -q
 ```
 
-转换测试会把五个官方模板摊成 API 图，并检查提示词、参考图和负向提示有没有灌对。演示模式测试会在没有 Ollama / Comfy 的机器上跑完示例章节并得到 mp4。改写测试覆盖三个改写模板的摊平、下拉匹配、缺节点和失败时的回退、成功时读回文字，以及开着人工确认时手动改提示词、阶段 4 用上改过的文字。
+转换测试会把五个官方模板摊成 API 图，并检查提示词、参考图和负向提示有没有灌对。演示模式测试会在没有 Ollama / Comfy 的机器上跑完示例章节并得到 mp4。改写测试覆盖三个改写模板的摊平、下拉匹配、缺节点和失败时的回退、成功时读回文字，以及开着人工确认时手动改提示词、阶段 4 用上改过的文字。配音测试覆盖提供方接口、占位 WAV、混音拼接、演示模式出配音。串行锁测试覆盖互斥排队、换家族卸载、关闭串行后的并发。
 
 ## 许可
 

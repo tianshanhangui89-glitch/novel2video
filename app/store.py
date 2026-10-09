@@ -10,6 +10,7 @@ from typing import Any
 
 from app.rewrite import VARIANTS as REWRITE_VARIANTS
 from app.storyboard import load_example, normalize_storyboard
+from app.tts import PROVIDERS as TTS_PROVIDERS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,6 +21,7 @@ STAGE_IDS = [
     "stage3",
     "stage3r",
     "stage4",
+    "stage4t",
     "stage5",
     "stage6",
 ]
@@ -31,6 +33,7 @@ STAGE_LABELS = {
     "stage3": "阶段 3 · 镜头关键帧",
     "stage3r": "阶段 3.5 · H3 提示词改写",
     "stage4": "阶段 4 · 镜头视频",
+    "stage4t": "阶段 4.5 · 配音",
     "stage5": "阶段 5 · 拼接成片",
     "stage6": "阶段 6 · 完成",
 }
@@ -54,15 +57,31 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rewrite_model": "",
     "rewrite_adapter": "",
     "rewrite_review": True,
+    "tts_enabled": False,
+    "tts_provider": "cosyvoice",
+    "tts_url": "http://127.0.0.1:50000",
+    "tts_voice": "中文女",
+    "tts_speed": 1.0,
+    "tts_volume": 1.0,
+    "tts_text_mode": "dialogue_or_action",
+    "serial_mode": True,
 }
 
-BOOL_SETTINGS = ("demo_mode", "rewrite_enabled", "rewrite_review")
+BOOL_SETTINGS = ("demo_mode", "rewrite_enabled", "rewrite_review", "tts_enabled", "serial_mode")
 
 
 def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _clamp_float(value: Any, default: float, low: float, high: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
 
 VIDEO_WORKFLOWS = {
     "h3_i2v": {
@@ -122,6 +141,12 @@ class Store:
             current["mock_llm"] = "auto"
         if current.get("rewrite_variant") not in REWRITE_VARIANTS:
             current["rewrite_variant"] = "8b"
+        if current.get("tts_provider") not in TTS_PROVIDERS:
+            current["tts_provider"] = "cosyvoice"
+        if current.get("tts_text_mode") not in {"dialogue", "dialogue_or_action"}:
+            current["tts_text_mode"] = "dialogue_or_action"
+        current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
+        current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
         for key in BOOL_SETTINGS:
             current[key] = _as_bool(current.get(key))
         return current
@@ -135,8 +160,16 @@ class Store:
             current[key] = _as_bool(current.get(key))
         if current.get("rewrite_variant") not in REWRITE_VARIANTS:
             current["rewrite_variant"] = "8b"
+        if current.get("tts_provider") not in TTS_PROVIDERS:
+            current["tts_provider"] = "cosyvoice"
+        if current.get("tts_text_mode") not in {"dialogue", "dialogue_or_action"}:
+            current["tts_text_mode"] = "dialogue_or_action"
         current["rewrite_model"] = str(current.get("rewrite_model") or "").strip()
         current["rewrite_adapter"] = str(current.get("rewrite_adapter") or "").strip()
+        current["tts_voice"] = str(current.get("tts_voice") or "").strip() or "中文女"
+        current["tts_url"] = str(current.get("tts_url") or "http://127.0.0.1:50000").rstrip("/")
+        current["tts_speed"] = _clamp_float(current.get("tts_speed"), 1.0, 0.5, 2.0)
+        current["tts_volume"] = _clamp_float(current.get("tts_volume"), 1.0, 0.0, 2.0)
         current["ollama_url"] = str(current["ollama_url"]).rstrip("/")
         current["comfy_url"] = str(current["comfy_url"]).rstrip("/")
         self.settings_path().write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -193,6 +193,22 @@ button:disabled { opacity: 0.55; cursor: wait; }
 @keyframes pulse { 50% { opacity: 0.45; } }
 
 .now { color: var(--amber); min-height: 1.4em; margin: 0 0 12px; }
+.gpu-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.gpu-card {
+  flex: 1 1 180px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.gpu-card strong { display: block; margin-bottom: 2px; font-size: 12px; color: var(--muted); }
+.gpu-card.hold { border-color: var(--amber); }
+.gpu-card.wait, .gpu-card.queue { border-color: #6a5438; }
+.gpu-card.idle { opacity: 0.85; }
+.gpu-card.off { color: var(--muted); }
+.tts-block { margin-top: 10px; }
+.tts-block audio { width: 100%; margin-top: 4px; }
 
 .editor { margin: 8px 0 18px; }
 .editor h2 { margin: 18px 0 8px; font-size: 16px; }

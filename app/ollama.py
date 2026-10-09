@@ -57,7 +57,15 @@ async def list_models(base_url: str, timeout: float = 8) -> list[str]:
     return models
 
 
-async def chat_json(base_url: str, model: str, system: str, user: str, timeout: float = 600) -> str:
+async def chat_json(
+    base_url: str,
+    model: str,
+    system: str,
+    user: str,
+    timeout: float = 600,
+    *,
+    keep_alive: Any = None,
+) -> str:
     url = base_url.rstrip("/") + "/api/chat"
     payload: dict[str, Any] = {
         "model": model,
@@ -68,6 +76,8 @@ async def chat_json(base_url: str, model: str, system: str, user: str, timeout: 
             {"role": "user", "content": user},
         ],
     }
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload)

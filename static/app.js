@@ -5,6 +5,7 @@ const STAGE_LABELS = {
   stage3: "镜头关键帧",
   stage3r: "H3 提示词改写",
   stage4: "镜头视频",
+  stage4t: "配音",
   stage5: "拼接成片",
   stage6: "完成",
 };
@@ -34,6 +35,7 @@ const state = {
   editorKey: "",
   stream: null,
   poll: null,
+  resources: null,
 };
 
 const main = document.getElementById("main");
@@ -143,8 +145,37 @@ function isH3(project) {
 }
 
 function stageNumber(key) {
-  return key === "stage3r" ? "3.5" : key.replace("stage", "");
+  if (key === "stage3r") return "3.5";
+  if (key === "stage4t") return "4.5";
+  return key.replace("stage", "");
 }
+
+function ttsChoices() {
+  return (state.workflows && state.workflows.tts) || [];
+}
+
+function ttsProvider(id) {
+  return ttsChoices().find((item) => item.id === (id || "cosyvoice")) || null;
+}
+
+function ttsNote(id) {
+  const found = ttsProvider(id);
+  return found ? found.note : "";
+}
+
+function ttsVoices(id) {
+  const found = ttsProvider(id);
+  return (found && found.voices) || [];
+}
+
+const TTS_SOURCE = {
+  demo: "演示配音",
+  cosyvoice: "CosyVoice",
+  local: "本地占位",
+  tts: "已配音",
+  skip: "跳过",
+  failed: "失败",
+};
 
 function videoNote(id) {
   const found = videoChoices().find((item) => item.id === id);
@@ -281,6 +312,8 @@ async function renderSettings() {
         </div>
       </div>
       ${rewriteSettings(settings)}
+      ${ttsSettings(settings)}
+      ${serialSettings(settings)}
       <div class="row">
         <button class="primary" type="submit">保存设置</button>
         <span class="hint" id="settings-msg"></span>
@@ -288,6 +321,69 @@ async function renderSettings() {
       <div id="check-result"></div>
     </form>`;
   if (state.services) paintChecks(state.services);
+}
+
+function ttsSettings(settings) {
+  const provider = settings.tts_provider || "cosyvoice";
+  const voices = ttsVoices(provider);
+  const needsUrl = (ttsProvider(provider) || {}).needs_url;
+  const cloning = (ttsProvider(provider) || {}).cloning;
+  return `
+    <section class="subsection">
+      <h2>配音（TTS）</h2>
+      <p class="hint">可选。镜头视频出完后，按分镜对白（没有对白时用动作作旁白）合成预设音色配音，对齐镜头时长，并在拼接时混进成片。只用预设音色，不做声音克隆。</p>
+      <div class="layout">
+        <div>
+          <label class="field">配音阶段
+            <select name="tts_enabled">
+              <option value="false" ${settings.tts_enabled ? "" : "selected"}>关闭</option>
+              <option value="true" ${settings.tts_enabled ? "selected" : ""}>开启，生成视频后配音</option>
+            </select>
+          </label>
+          <label class="field">提供方
+            <select name="tts_provider" id="tts-provider">
+              ${ttsChoices().map((item) => `<option value="${esc(item.id)}" ${item.id === provider ? "selected" : ""}>${esc(item.label)}${item.cloning ? " · 未实现" : ""}</option>`).join("")}
+            </select>
+          </label>
+          <p class="callout" id="tts-note">${esc(ttsNote(provider))}</p>
+          <label class="field">朗读文本
+            <select name="tts_text_mode">
+              <option value="dialogue_or_action" ${settings.tts_text_mode !== "dialogue" ? "selected" : ""}>优先对白，没有则用动作旁白</option>
+              <option value="dialogue" ${settings.tts_text_mode === "dialogue" ? "selected" : ""}>只读对白，没有则跳过</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label class="field">CosyVoice 地址
+            <input name="tts_url" type="text" value="${esc(settings.tts_url || "http://127.0.0.1:50000")}" ${needsUrl ? "" : "disabled"}>
+          </label>
+          <label class="field">音色 / 说话人
+            <input name="tts_voice" type="text" list="tts-voice-list" value="${esc(settings.tts_voice || "中文女")}" ${cloning ? "disabled" : ""}>
+            <datalist id="tts-voice-list">${voices.map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join("")}</datalist>
+          </label>
+          <label class="field">语速（0.5–2.0）
+            <input name="tts_speed" type="number" min="0.5" max="2" step="0.1" value="${esc(settings.tts_speed ?? 1)}">
+          </label>
+          <label class="field">音量（0–2.0）
+            <input name="tts_volume" type="number" min="0" max="2" step="0.1" value="${esc(settings.tts_volume ?? 1)}">
+          </label>
+        </div>
+      </div>
+    </section>`;
+}
+
+function serialSettings(settings) {
+  return `
+    <section class="subsection">
+      <h2>低配串行</h2>
+      <p class="hint">本机显存/内存有限时请保持开启。Ollama、ComfyUI（出图 / H3 改写 / 视频）和配音同一时间只跑一个；换家族前会卸载上一个模型（Ollama keep_alive=0、ComfyUI /free、TTS release）。流水线按阶段批处理，减少模型来回切换。运行页会显示谁占用 GPU、谁在排队。</p>
+      <label class="field">低配串行模式
+        <select name="serial_mode">
+          <option value="true" ${settings.serial_mode !== false ? "selected" : ""}>开启（推荐，默认）</option>
+          <option value="false" ${settings.serial_mode === false ? "selected" : ""}>关闭（不保证显存互斥）</option>
+        </select>
+      </label>
+    </section>`;
 }
 
 function rewriteSettings(settings) {
@@ -336,7 +432,9 @@ function paintChecks(result) {
   if (!host || !result) return;
   const line = (item, title) => `<p class="check-line ${item && item.ok ? "ok" : "bad"}">${title}：${esc(item ? item.detail : "没有结果")}</p>`;
   host.innerHTML = line(result.ollama, "Ollama") + line(result.comfy, "ComfyUI") + line(result.ffmpeg, "FFmpeg")
-    + (result.rewriter ? line(result.rewriter, "H3 改写节点") : "");
+    + (result.rewriter ? line(result.rewriter, "H3 改写节点") : "")
+    + (result.tts ? line(result.tts, "配音 TTS") : "")
+    + (result.serial ? line(result.serial, "低配串行") : "");
 }
 
 function runSkeleton() {
@@ -349,6 +447,7 @@ function runSkeleton() {
       <div class="row" id="run-actions"></div>
     </header>
     <div id="banners"></div>
+    <div class="gpu-strip" id="gpu-strip"></div>
     <div class="stages" id="stages"></div>
     <p class="now" id="now"></p>
     <div id="editor-host"></div>
@@ -371,6 +470,7 @@ function paintRun(project, rebuildEditor) {
   document.getElementById("run-sub").textContent = `${project.aspect || ""} · ${videoLabel(project.video_workflow)}`;
   document.getElementById("run-actions").innerHTML = actionButtons(project);
   document.getElementById("banners").innerHTML = banners(project);
+  paintGpu(project);
   const stageHost = document.getElementById("stages");
   const stageSig = JSON.stringify(project.stages || {});
   if (stageHost.dataset.sig !== stageSig) {
@@ -410,18 +510,48 @@ function actionButtons(project) {
   }
   const rewriteAgain = state.settings && state.settings.rewrite_enabled && isH3(project) && project.storyboard
     ? `<button data-action="rerun" data-id="${esc(id)}" data-from="stage3r">从改写重跑</button>` : "";
+  const ttsAgain = state.settings && state.settings.tts_enabled && project.storyboard
+    ? `<button data-action="rerun" data-id="${esc(id)}" data-from="stage4t">从配音重跑</button>` : "";
   if (project.status === "failed") {
     return `<button class="primary" data-action="retry" data-id="${esc(id)}">重试失败阶段</button>
-      ${rewriteAgain}
+      ${rewriteAgain}${ttsAgain}
       <button data-action="rerun" data-id="${esc(id)}" data-from="stage0">从头重跑</button>
       <a class="btn" href="#/gallery/${esc(id)}">画廊</a>`;
   }
   if (project.status === "done") {
     return `<a class="btn primary" href="#/gallery/${esc(id)}">打开画廊</a>
-      ${rewriteAgain}
+      ${rewriteAgain}${ttsAgain}
       <button data-action="rerun" data-id="${esc(id)}" data-from="stage0">从头重跑</button>`;
   }
   return `<button class="primary" data-action="rerun" data-id="${esc(id)}" data-from="stage0">开始生成</button>`;
+}
+
+function paintGpu(project) {
+  const host = document.getElementById("gpu-strip");
+  if (!host) return;
+  const serial = !state.settings || state.settings.serial_mode !== false;
+  if (!serial) {
+    host.innerHTML = `<div class="gpu-card off">低配串行已关闭 — 不保证显存互斥</div>`;
+    return;
+  }
+  const res = state.resources || {};
+  const holder = res.holder;
+  const queue = res.queue || [];
+  const mine = project && project.gpu && project.gpu.state !== "idle" ? project.gpu : null;
+  let body = "";
+  if (holder) {
+    const mineHold = holder.project_id === (project && project.id);
+    body += `<div class="gpu-card hold"><strong>GPU 占用</strong><span>${esc(holder.family_label || holder.family)} · ${esc(holder.label || "")}${mineHold ? "（本项目）" : `（项目 ${esc(holder.project_id)}）`}</span></div>`;
+  } else {
+    body += `<div class="gpu-card idle"><strong>GPU 空闲</strong><span>下一阶段需要模型时会排队占用</span></div>`;
+  }
+  if (mine && mine.state === "queued") {
+    body += `<div class="gpu-card wait"><strong>本项目排队</strong><span>${esc(mine.family_label || "")} · ${esc(mine.label || "")}</span></div>`;
+  }
+  if (queue.length) {
+    body += `<div class="gpu-card queue"><strong>等待中 ${queue.length}</strong><span>${queue.map((item) => `${esc(item.family_label)}（${esc(item.project_id)}）`).join(" → ")}</span></div>`;
+  }
+  host.innerHTML = body;
 }
 
 function banners(project) {
@@ -437,7 +567,7 @@ function banners(project) {
 function paintShots(project) {
   const host = document.getElementById("shots");
   const shots = (project.storyboard && project.storyboard.shots) || [];
-  const signature = JSON.stringify(shots.map((shot) => [shot.shot_id, shot.status, shot.keyframe, shot.video, shot.action, shot.dialogue, shot.h3_prompt, shot.h3_prompt_source]));
+  const signature = JSON.stringify(shots.map((shot) => [shot.shot_id, shot.status, shot.keyframe, shot.video, shot.action, shot.dialogue, shot.h3_prompt, shot.h3_prompt_source, shot.tts_audio, shot.tts_source]));
   if (host.dataset.sig === signature) return;
   host.dataset.sig = signature;
   const open = new Set([...host.querySelectorAll("details[open]")].map((node) => node.dataset.id));
@@ -459,6 +589,7 @@ function paintShots(project) {
         <div>
           ${shot.keyframe ? `<img alt="镜头 ${esc(shot.shot_id)} 关键帧" src="${mediaUrl(project, shot.keyframe)}">` : `<p class="empty">关键帧还没有</p>`}
           ${shot.video ? `<video controls src="${mediaUrl(project, shot.video)}" style="margin-top:8px"></video>` : ""}
+          ${shot.tts_audio ? `<div class="tts-block"><div class="compare-head">配音 ${ttsChip(shot)}</div><audio controls src="${mediaUrl(project, shot.tts_audio)}"></audio><p class="hint">${esc(shot.tts_text || "")}${shot.tts_duration ? ` · ${Number(shot.tts_duration).toFixed(1)} 秒` : ""}</p></div>` : (shot.tts_source === "skip" || shot.tts_source === "failed" ? `<p class="hint">配音：${esc(TTS_SOURCE[shot.tts_source] || shot.tts_source)}${shot.tts_note ? " · " + esc(shot.tts_note) : ""}</p>` : "")}
         </div>
         <div class="meta">
           <p>场景 ${esc(shot.scene_id || "—")} · 角色 ${esc((shot.characters || []).join("、") || "—")}</p>
@@ -471,6 +602,12 @@ function paintShots(project) {
       ${promptCompare(shot)}
     </details>`;
   }).join("");
+}
+
+function ttsChip(shot) {
+  const source = shot.tts_source || "";
+  const kind = source === "failed" ? "bad" : source === "skip" ? "" : "done";
+  return `<span class="chip ${kind}">${esc(TTS_SOURCE[source] || source)}</span>`;
 }
 
 function sourceChip(shot) {
@@ -673,9 +810,12 @@ function openStream(id) {
   state.stream = source;
   source.onmessage = (event) => {
     const data = JSON.parse(event.data);
+    if (data.resources) state.resources = data.resources;
     if (data.project && state.view === "run" && state.projectId === id) {
       state.project = data.project;
       paintRun(data.project, false);
+    } else if (data.type === "resources" && state.view === "run") {
+      paintGpu(state.project);
     }
   };
   state.poll = setInterval(async () => {
@@ -774,6 +914,10 @@ async function saveSettings(form) {
   data.demo_mode = data.demo_mode === "true";
   data.rewrite_enabled = data.rewrite_enabled === "true";
   data.rewrite_review = data.rewrite_review === "true";
+  data.tts_enabled = data.tts_enabled === "true";
+  data.serial_mode = data.serial_mode === "true";
+  data.tts_speed = Number(data.tts_speed || 1);
+  data.tts_volume = Number(data.tts_volume || 1);
   if (data.rewrite_variant === "writer") delete data.rewrite_adapter;
   state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(data) });
   const msg = document.getElementById("settings-msg");
@@ -918,6 +1062,17 @@ main.addEventListener("change", (event) => {
   if (event.target.name === "video_workflow") {
     const note = document.getElementById("vram-note");
     if (note) note.textContent = videoNote(event.target.value);
+  }
+  if (event.target.id === "tts-provider") {
+    const note = document.getElementById("tts-note");
+    if (note) note.textContent = ttsNote(event.target.value);
+    const found = ttsProvider(event.target.value);
+    const url = document.querySelector("input[name=tts_url]");
+    const voice = document.querySelector("input[name=tts_voice]");
+    const list = document.getElementById("tts-voice-list");
+    if (url) url.disabled = !(found && found.needs_url);
+    if (voice) voice.disabled = !!(found && found.cloning);
+    if (list && found) list.innerHTML = (found.voices || []).map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join("");
   }
   if (event.target.id === "rewrite-variant") {
     const note = document.getElementById("rewrite-note");

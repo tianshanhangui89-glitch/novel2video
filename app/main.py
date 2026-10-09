@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from app.checks import check_all
 from app.pipeline import Engine
 from app.rewrite import VARIANTS as REWRITE_VARIANTS
+from app.tts import list_providers as list_tts_providers
+from app.resources import GATE, FAMILY_LABELS
 from app.store import ROOT, STAGE_IDS, VIDEO_WORKFLOWS, Store
 from app.storyboard import StoryboardError, load_example
 
@@ -41,6 +43,14 @@ class SettingsIn(BaseModel):
     rewrite_model: str | None = None
     rewrite_adapter: str | None = None
     rewrite_review: bool | None = None
+    tts_enabled: bool | None = None
+    tts_provider: str | None = None
+    tts_url: str | None = None
+    tts_voice: str | None = None
+    tts_speed: float | None = None
+    tts_volume: float | None = None
+    tts_text_mode: str | None = None
+    serial_mode: bool | None = None
 
 
 class ProjectIn(BaseModel):
@@ -84,6 +94,12 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
     async def health():
         return {"ok": True, "name": "Novel2Video"}
 
+    @app.get("/api/resources")
+    async def resources():
+        snap = engine.resources()
+        snap["serial_mode"] = store.load_settings().get("serial_mode", True)
+        return snap
+
     @app.get("/api/settings")
     async def get_settings():
         return store.load_settings()
@@ -102,6 +118,10 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
             "files": store.list_workflow_files(),
             "video": list(VIDEO_WORKFLOWS.values()),
             "rewrite": list(REWRITE_VARIANTS.values()),
+            "tts": list_tts_providers(),
+            "gpu_families": [
+                {"id": key, "label": label} for key, label in FAMILY_LABELS.items()
+            ],
         }
 
     @app.get("/api/sample-chapter")
@@ -215,7 +235,7 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
         async def gen():
             try:
                 current = store.load_project(project_id)
-                yield _sse({"type": "snapshot", "project": current})
+                yield _sse({"type": "snapshot", "project": current, "resources": engine.resources()})
                 while True:
                     if await request.is_disconnected():
                         break

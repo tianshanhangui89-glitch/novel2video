@@ -6,6 +6,7 @@ from app.comfy import ComfyClient, ComfyError
 from app.ollama import OllamaError, list_models
 from app.rewrite import missing_nodes, variant
 from app.stitch import StitchError, ffmpeg_version
+from app.tts import get_provider, provider_info
 
 
 async def check_all(settings: dict) -> dict:
@@ -15,6 +16,16 @@ async def check_all(settings: dict) -> dict:
     result = {"ollama": ollama, "comfy": comfy, "ffmpeg": ffmpeg}
     if settings.get("rewrite_enabled"):
         result["rewriter"] = await _rewriter(settings, comfy["ok"])
+    if settings.get("tts_enabled"):
+        result["tts"] = await _tts(settings)
+    result["serial"] = {
+        "ok": True,
+        "detail": (
+            "低配串行已开启：Ollama / ComfyUI / 配音同一时间只跑一个，换家族前会卸模型"
+            if settings.get("serial_mode", True)
+            else "低配串行已关闭：不保证显存互斥，多任务可能同时占 GPU"
+        ),
+    }
     return result
 
 
@@ -68,3 +79,11 @@ async def _rewriter(settings: dict, comfy_ok: bool) -> dict:
             "detail": f"缺少节点 {'、'.join(missing)}。在 ComfyUI Manager 搜索 minimax-h3-prompt-rewriter 安装",
         }
     return {"ok": True, "detail": f"{spec['label']} 节点已就绪，显存约 {spec['vram'].lstrip('~')}"}
+
+
+async def _tts(settings: dict) -> dict:
+    info = provider_info(settings.get("tts_provider"))
+    if info.cloning:
+        return {"ok": False, "detail": info.note}
+    provider = get_provider(settings.get("tts_provider"))
+    return await provider.health(settings)

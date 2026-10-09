@@ -21,11 +21,13 @@ from app.rewrite import (
     uses_image,
 )
 from app.rewrite import variant as rewrite_variant
-from app.demo_media import write_card, write_clip
+from app.demo_media import write_card, write_clip, write_speech
 from app.ollama import OllamaError, chat_json, choose_model, list_models
 from app.store import STAGE_IDS, VIDEO_WORKFLOWS, Store, now_iso
 from app.storyboard import StoryboardError, mock_storyboard, normalize_storyboard, parse_json_content, system_prompt
-from app.stitch import StitchError, stitch
+from app.stitch import StitchError, pad_or_trim_video, probe_duration, stitch
+from app.tts import TTSError, get_provider, provider_info, speakable_text
+from app.resources import FAMILY_LABELS, GATE, unload_family
 
 log = logging.getLogger("novel2video")
 
@@ -41,6 +43,19 @@ class Engine:
         self.gates: dict[str, asyncio.Event] = {}
         self.cancel_flags: dict[str, bool] = {}
         self.subscribers: dict[str, set[asyncio.Queue]] = {}
+        GATE.subscribe(self._on_resources)
+
+    def _on_resources(self, snap: dict) -> None:
+        payload = {"type": "resources", "resources": snap}
+        for queues in list(self.subscribers.values()):
+            for queue in list(queues):
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    pass
+
+    def resources(self) -> dict:
+        return GATE.snapshot()
 
     def subscribe(self, project_id: str) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
@@ -52,7 +67,7 @@ class Engine:
 
     def publish(self, project: dict) -> None:
         self.store.save_project(project)
-        payload = {"type": "snapshot", "project": project}
+        payload = {"type": "snapshot", "project": project, "resources": GATE.snapshot()}
         for queue in list(self.subscribers.get(project["id"], set())):
             try:
                 queue.put_nowait(payload)
@@ -74,6 +89,57 @@ class Engine:
     def _check(self, project_id: str) -> None:
         if self.cancel_flags.get(project_id):
             raise Cancelled("已停止")
+
+    def _gpu(self, project_id: str, family: str, stage: str, label: str):
+        """Serialize heavy model work and unload the previous family on switch."""
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _ctx():
+            settings = self.store.load_settings()
+            serial = bool(settings.get("serial_mode", True))
+            if not serial:
+                yield
+                return
+            project = self.store.load_project(project_id)
+            project["current_label"] = f"排队等待 GPU · {label}"
+            project["gpu"] = {
+                "state": "queued",
+                "family": family,
+                "family_label": FAMILY_LABELS.get(family, family),
+                "stage": stage,
+                "label": label,
+            }
+            self.publish(project)
+            async with GATE.hold(
+                family=family,
+                project_id=project_id,
+                stage=stage,
+                label=label,
+                settings=settings,
+            ) as ticket:
+                self._check(project_id)
+                for note in list(getattr(GATE, "last_unload_notes", []) or []):
+                    self.log(self.store.load_project(project_id), note)
+                project = self.store.load_project(project_id)
+                project["current_label"] = label
+                project["gpu"] = {
+                    "state": "holding",
+                    "family": family,
+                    "family_label": FAMILY_LABELS.get(family, family),
+                    "stage": stage,
+                    "label": label,
+                }
+                self.publish(project)
+                try:
+                    yield
+                finally:
+                    project = self.store.load_project(project_id)
+                    if project.get("gpu", {}).get("state") == "holding":
+                        project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
+                        self.publish(project)
+
+        return _ctx()
 
     async def start(self, project_id: str, from_stage: str = "stage0") -> dict:
         existing = self.tasks.get(project_id)
@@ -110,6 +176,9 @@ class Engine:
                     self._drop_video(project, shot)
                 for key in ("h3_prompt", "h3_prompt_original", "h3_prompt_source", "h3_prompt_note"):
                     shot.pop(key, None)
+        if start <= STAGE_IDS.index("stage4t") and project.get("storyboard"):
+            for shot in project["storyboard"].get("shots") or []:
+                self._drop_tts(project, shot)
         if start <= STAGE_IDS.index("stage5"):
             project["final_video"] = ""
         project["status"] = "running"
@@ -194,14 +263,25 @@ class Engine:
             if due("stage0"):
                 await self._stage0(project_id)
             if due("stage1"):
-                await self._stage1(project_id)
+                if self.store.load_settings().get("mock_llm") == "always":
+                    await self._stage1(project_id)
+                else:
+                    async with self._gpu(project_id, "llm", "stage1", "分镜 · Ollama"):
+                        await self._stage1(project_id)
                 await self._wait_approval(project_id)
             if due("stage2"):
-                await self._stage2(project_id)
+                async with self._gpu(project_id, "image", "stage2", "参考图 · ComfyUI"):
+                    await self._stage2(project_id)
             if due("stage3"):
-                await self._stage3(project_id)
+                async with self._gpu(project_id, "image", "stage3", "关键帧 · ComfyUI"):
+                    await self._stage3(project_id)
             if due("stage3r"):
-                rewrote = await self._stage_rewrite(project_id)
+                settings = self.store.load_settings()
+                if settings.get("rewrite_enabled"):
+                    async with self._gpu(project_id, "rewrite", "stage3r", "H3 提示词改写"):
+                        rewrote = await self._stage_rewrite(project_id)
+                else:
+                    rewrote = await self._stage_rewrite(project_id)
                 if rewrote and self.store.load_settings().get("rewrite_review"):
                     await self._wait_gate(
                         project_id,
@@ -210,19 +290,30 @@ class Engine:
                         "H3 提示词已改写。可以对照原文逐镜修改，确认后才开始生成视频。",
                     )
             if due("stage4"):
-                await self._stage4(project_id)
+                async with self._gpu(project_id, "video", "stage4", "镜头视频 · ComfyUI"):
+                    await self._stage4(project_id)
+            if due("stage4t"):
+                if self.store.load_settings().get("tts_enabled"):
+                    async with self._gpu(project_id, "tts", "stage4t", "配音"):
+                        await self._stage_tts(project_id)
+                else:
+                    await self._stage_tts(project_id)
             if due("stage5"):
                 await self._stage5(project_id)
             await self._stage6(project_id)
             project = self.store.load_project(project_id)
             project["status"] = "done"
             project["current_label"] = "成片已就绪"
+            project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
             self.log(project, "流水线完成")
+            await self._release_gpu_after_run(project_id)
         except Cancelled:
             project = self.store.load_project(project_id)
             project["status"] = "cancelled"
             project["current_label"] = "已停止"
+            project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
             self.log(project, "流水线已停止", "warning")
+            await self._release_gpu_after_run(project_id)
         except Exception as exc:
             project = self.store.load_project(project_id)
             project["status"] = "failed"
@@ -231,7 +322,9 @@ class Engine:
             failed = next((s for s in STAGE_IDS if project["stages"].get(s, {}).get("status") == "running"), None)
             if failed:
                 self.set_stage(project, failed, "failed", str(exc)[:240])
+            project["gpu"] = {"state": "idle", "family": "", "family_label": "", "stage": "", "label": ""}
             self.log(project, str(exc), "error")
+            await self._release_gpu_after_run(project_id)
             log.exception("pipeline failed")
 
     async def _wait_approval(self, project_id: str) -> None:
@@ -259,6 +352,22 @@ class Engine:
         project = self.store.load_project(project_id)
         project["status"] = "running"
         self.publish(project)
+
+    async def _release_gpu_after_run(self, project_id: str) -> None:
+        """Drop the last family's weights so the desktop gets VRAM back."""
+        settings = self.store.load_settings()
+        if not settings.get("serial_mode", True):
+            return
+        snap = GATE.snapshot()
+        if snap.get("holder") or snap.get("queue"):
+            return
+        family = snap.get("last_family") or getattr(GATE, "_last_family", None)
+        if not family:
+            return
+        notes = await unload_family(family, settings)
+        GATE._last_family = None
+        for note in notes:
+            self.log(self.store.load_project(project_id), note)
 
     async def _stage0(self, project_id: str) -> None:
         self._check(project_id)
@@ -601,20 +710,185 @@ class Engine:
         project = self.store.load_project(project_id)
         self.set_stage(project, "stage4", "done", f"{len(shots)} 条")
 
+    async def _stage_tts(self, project_id: str) -> None:
+        """Generate per-shot voiceover and align video length to the audio when needed."""
+        project = self.store.load_project(project_id)
+        settings = self.store.load_settings()
+        shots = (project.get("storyboard") or {}).get("shots") or []
+        if not settings.get("tts_enabled"):
+            self.set_stage(project, "stage4t", "done", "未启用")
+            return
+        info = provider_info(settings.get("tts_provider"))
+        if info.cloning:
+            raise TTSError(info.note)
+        demo = bool(settings.get("demo_mode"))
+        provider = get_provider(settings.get("tts_provider"))
+        mode = settings.get("tts_text_mode") or "dialogue_or_action"
+        voice = settings.get("tts_voice") or "中文女"
+        speed = float(settings.get("tts_speed") or 1.0)
+        label = info.label
+        self.set_stage(project, "stage4t", "running", label)
+        if demo:
+            self.log(project, f"演示模式模拟配音（{label}）")
+        else:
+            self.log(project, f"配音：{label} · 音色 {voice} · 语速 {speed:g}")
+
+        spoken = 0
+        for index, shot in enumerate(shots, start=1):
+            self._check(project_id)
+            project = self.store.load_project(project_id)
+            sid = shot["shot_id"]
+            text = speakable_text(shot, mode)
+            project["current_label"] = f"镜头 {sid} · 配音"
+            self.set_stage(project, "stage4t", "running", f"{index}/{len(shots)} · {label}")
+            rel = f"shots/{sid}_tts.wav"
+            dest = self.store.media_dir(project_id) / rel
+            if not text:
+                self._assign_tts(project, sid, audio="", text="", duration=0.0, source="skip", note="无可读文本")
+                self.log(project, f"镜头 {sid} 没有对白或旁白，跳过配音")
+                self.publish(project)
+                continue
+            if dest.is_file() and shot.get("tts_audio") == rel and shot.get("tts_text") == text:
+                self.log(project, f"镜头 {sid} 已有配音，跳过")
+                spoken += 1
+                continue
+            note = ""
+            source = "tts"
+            duration = 0.0
+            try:
+                if demo:
+                    await asyncio.sleep(0.08)
+                    duration = await asyncio.to_thread(write_speech, dest, text, speed)
+                    source = "demo"
+                else:
+                    duration = await provider.synthesize(
+                        text,
+                        dest,
+                        voice=voice,
+                        speed=speed,
+                        settings=settings,
+                    )
+                    source = settings.get("tts_provider") or "tts"
+            except Cancelled:
+                raise
+            except Exception as exc:
+                if self.cancel_flags.get(project_id):
+                    raise Cancelled("已停止") from exc
+                duration = 0.0
+                source = "failed"
+                note = str(exc)[:300]
+                if dest.is_file():
+                    dest.unlink()
+                self.log(self.store.load_project(project_id), f"镜头 {sid} 配音失败：{exc}", "warning")
+            project = self.store.load_project(project_id)
+            if source not in {"failed", "skip"} and duration > 0:
+                spoken += 1
+                await self._align_shot_to_audio(project_id, sid, duration)
+                project = self.store.load_project(project_id)
+            self._assign_tts(
+                project,
+                sid,
+                audio=rel if source not in {"failed", "skip"} else "",
+                text=text,
+                duration=duration,
+                source=source,
+                note=note,
+            )
+            if source not in {"failed", "skip"}:
+                self.log(project, f"镜头 {sid} 配音 {duration:.2f} 秒：「{text[:40]}」")
+            self.publish(project)
+        project = self.store.load_project(project_id)
+        self.set_stage(project, "stage4t", "done", f"{spoken}/{len(shots)} 条")
+
+    async def _align_shot_to_audio(self, project_id: str, shot_id: str, audio_sec: float) -> None:
+        """Pad or trim the shot video so it covers the voiceover."""
+        project = self.store.load_project(project_id)
+        shot = next(
+            (
+                item
+                for item in (project.get("storyboard") or {}).get("shots") or []
+                if item.get("shot_id") == shot_id
+            ),
+            None,
+        )
+        if not shot:
+            return
+        rel = shot.get("video") or f"shots/{shot_id}.mp4"
+        path = self.store.media_dir(project_id) / rel
+        if not path.is_file():
+            return
+        try:
+            video_sec = await asyncio.to_thread(probe_duration, path)
+        except StitchError:
+            return
+        if audio_sec <= video_sec + 0.08:
+            if audio_sec > float(shot.get("duration_sec") or 0):
+                shot["duration_sec"] = round(max(video_sec, audio_sec), 2)
+                self.publish(project)
+            return
+        aligned = path.with_name(path.stem + "_aligned" + path.suffix)
+        try:
+            new_dur = await asyncio.to_thread(pad_or_trim_video, path, aligned, audio_sec)
+        except StitchError as exc:
+            self.log(project, f"镜头 {shot_id} 对齐失败，仍用原视频：{exc}", "warning")
+            return
+        aligned.replace(path)
+        shot["duration_sec"] = round(new_dur, 2)
+        shot["video"] = rel
+        self.log(project, f"镜头 {shot_id} 视频从 {video_sec:.2f}s 对齐到 {new_dur:.2f}s（配音）")
+        self.publish(project)
+
+    def _assign_tts(
+        self,
+        project: dict,
+        shot_id: str,
+        *,
+        audio: str,
+        text: str,
+        duration: float,
+        source: str,
+        note: str = "",
+    ) -> None:
+        for shot in project["storyboard"].get("shots") or []:
+            if shot.get("shot_id") == shot_id:
+                shot["tts_audio"] = audio
+                shot["tts_text"] = text
+                shot["tts_duration"] = round(float(duration or 0), 3)
+                shot["tts_source"] = source
+                shot["tts_note"] = note
+
+    def _drop_tts(self, project: dict, shot: dict) -> None:
+        rel = shot.get("tts_audio") or f"shots/{shot.get('shot_id')}_tts.wav"
+        path = self.store.media_dir(project["id"]) / rel
+        if path.is_file():
+            path.unlink()
+        for key in ("tts_audio", "tts_text", "tts_source", "tts_note"):
+            shot[key] = ""
+        shot["tts_duration"] = 0.0
+
     async def _stage5(self, project_id: str) -> None:
         project = self.store.load_project(project_id)
         self.set_stage(project, "stage5", "running", "FFmpeg 拼接")
         project["current_label"] = "拼接成片"
         self.publish(project)
-        shots = (project.get("storyboard") or {}).get("shots") or []
+        shots = sorted(
+            (project.get("storyboard") or {}).get("shots") or [],
+            key=lambda item: item.get("shot_id") or "",
+        )
         paths = []
-        for shot in sorted(shots, key=lambda item: item.get("shot_id") or ""):
+        voices: list = []
+        media = self.store.media_dir(project_id)
+        for shot in shots:
             rel = shot.get("video")
             if not rel:
                 continue
-            path = self.store.media_dir(project_id) / rel
-            if path.is_file():
-                paths.append(path)
+            path = media / rel
+            if not path.is_file():
+                continue
+            paths.append(path)
+            voice_rel = shot.get("tts_audio") or ""
+            voice = media / voice_rel if voice_rel else None
+            voices.append(voice if voice and voice.is_file() else None)
         if not paths:
             raise StitchError("没有镜头视频可拼接")
         settings = self.store.load_settings()
@@ -626,8 +900,23 @@ class Engine:
             width, height = dimensions(project.get("aspect") or "16:9", kind)
         dest = self.store.media_dir(project_id) / "final" / "chapter.mp4"
         work = self.store.media_dir(project_id) / "final" / "norm"
-        self.log(project, f"拼接 {len(paths)} 条镜头为 {width}×{height}")
-        await asyncio.to_thread(stitch, paths, dest, width, height, work)
+        volume = float(settings.get("tts_volume") or 1.0) if settings.get("tts_enabled") else 1.0
+        voiced = sum(1 for item in voices if item)
+        self.log(
+            project,
+            f"拼接 {len(paths)} 条镜头为 {width}×{height}"
+            + (f"，混入 {voiced} 条配音" if voiced else ""),
+        )
+        await asyncio.to_thread(
+            stitch,
+            paths,
+            dest,
+            width,
+            height,
+            work,
+            voiceovers=voices if any(voices) else None,
+            volume=volume,
+        )
         project = self.store.load_project(project_id)
         project["final_video"] = "final/chapter.mp4"
         self.set_stage(project, "stage5", "done", dest.name)

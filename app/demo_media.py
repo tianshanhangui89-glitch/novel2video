@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from app.stitch import StitchError, ffmpeg_bin
+from app.tts import estimate_duration, write_placeholder_wav
 
 FONT = Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc")
 
@@ -82,3 +83,9 @@ def write_clip(image: Path, dest: Path, seconds: float) -> None:
     if result.returncode != 0:
         tail = "\n".join((result.stderr or "").splitlines()[-8:])
         raise StitchError(tail or "演示视频编码失败")
+
+
+def write_speech(dest: Path, text: str, speed: float = 1.0) -> float:
+    """Demo-mode stand-in voiceover: soft chirp sized to the spoken text."""
+    seconds = estimate_duration(text, speed)
+    return write_placeholder_wav(dest, seconds, seed=abs(hash(text)) % 97)

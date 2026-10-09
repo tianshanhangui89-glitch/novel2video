@@ -81,6 +81,17 @@ class ComfyClient:
         except httpx.HTTPError as exc:
             raise ComfyError(f"无法连接 ComfyUI（{self.base_url}）：{exc}") from exc
 
+    async def free(self, unload_models: bool = True, free_memory: bool = True) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    self.base_url + "/free",
+                    json={"unload_models": unload_models, "free_memory": free_memory},
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ComfyError(f"ComfyUI /free 失败：{exc}") from exc
+
     async def object_info(self) -> dict | None:
         try:
             async with httpx.AsyncClient(timeout=20) as client:

@@ -52,6 +52,14 @@ def _duration(value: Any) -> float:
     return max(2.0, min(15.0, number))
 
 
+def _float_field(value: Any, default: float, low: float, high: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
+
+
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -141,6 +149,11 @@ def normalize_storyboard(
                 "h3_prompt": _clip(raw.get("h3_prompt"), 8000),
                 "h3_prompt_source": _clip(raw.get("h3_prompt_source"), 32),
                 "h3_prompt_note": _clip(raw.get("h3_prompt_note"), 500),
+                "tts_audio": _clip(raw.get("tts_audio"), 300),
+                "tts_text": _clip(raw.get("tts_text"), 1000),
+                "tts_duration": _float_field(raw.get("tts_duration"), 0.0, 0.0, 60.0),
+                "tts_source": _clip(raw.get("tts_source"), 32),
+                "tts_note": _clip(raw.get("tts_note"), 500),
                 "status": _clip(raw.get("status") or "pending", 32) or "pending",
                 "error": _clip(raw.get("error"), 500),
             }
