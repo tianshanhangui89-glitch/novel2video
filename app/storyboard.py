@@ -137,6 +137,10 @@ def normalize_storyboard(
                 "motion_prompt": _clip(raw.get("motion_prompt") or "slow cinematic camera move, natural motion"),
                 "keyframe": _clip(raw.get("keyframe"), 300),
                 "video": _clip(raw.get("video"), 300),
+                "h3_prompt_original": _clip(raw.get("h3_prompt_original"), 8000),
+                "h3_prompt": _clip(raw.get("h3_prompt"), 8000),
+                "h3_prompt_source": _clip(raw.get("h3_prompt_source"), 32),
+                "h3_prompt_note": _clip(raw.get("h3_prompt_note"), 500),
                 "status": _clip(raw.get("status") or "pending", 32) or "pending",
                 "error": _clip(raw.get("error"), 500),
             }

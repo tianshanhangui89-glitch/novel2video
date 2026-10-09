@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.rewrite import VARIANTS as REWRITE_VARIANTS
 from app.storyboard import load_example, normalize_storyboard
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ STAGE_IDS = [
     "stage1",
     "stage2",
     "stage3",
+    "stage3r",
     "stage4",
     "stage5",
     "stage6",
@@ -27,6 +29,7 @@ STAGE_LABELS = {
     "stage1": "阶段 1 · 分镜结构化",
     "stage2": "阶段 2 · 参考图",
     "stage3": "阶段 3 · 镜头关键帧",
+    "stage3r": "阶段 3.5 · H3 提示词改写",
     "stage4": "阶段 4 · 镜头视频",
     "stage5": "阶段 5 · 拼接成片",
     "stage6": "阶段 6 · 完成",
@@ -46,7 +49,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "aspect": "16:9",
     "demo_mode": False,
     "mock_llm": "auto",
+    "rewrite_enabled": False,
+    "rewrite_variant": "8b",
+    "rewrite_model": "",
+    "rewrite_adapter": "",
+    "rewrite_review": True,
 }
+
+BOOL_SETTINGS = ("demo_mode", "rewrite_enabled", "rewrite_review")
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 VIDEO_WORKFLOWS = {
     "h3_i2v": {
@@ -104,7 +120,10 @@ class Store:
             current["aspect"] = "16:9"
         if current.get("mock_llm") not in {"auto", "always", "never"}:
             current["mock_llm"] = "auto"
-        current["demo_mode"] = bool(current.get("demo_mode"))
+        if current.get("rewrite_variant") not in REWRITE_VARIANTS:
+            current["rewrite_variant"] = "8b"
+        for key in BOOL_SETTINGS:
+            current[key] = _as_bool(current.get(key))
         return current
 
     def save_settings(self, payload: dict) -> dict:
@@ -112,7 +131,12 @@ class Store:
         for key in DEFAULT_SETTINGS:
             if key in payload and payload[key] is not None:
                 current[key] = payload[key]
-        current["demo_mode"] = bool(current.get("demo_mode"))
+        for key in BOOL_SETTINGS:
+            current[key] = _as_bool(current.get(key))
+        if current.get("rewrite_variant") not in REWRITE_VARIANTS:
+            current["rewrite_variant"] = "8b"
+        current["rewrite_model"] = str(current.get("rewrite_model") or "").strip()
+        current["rewrite_adapter"] = str(current.get("rewrite_adapter") or "").strip()
         current["ollama_url"] = str(current["ollama_url"]).rstrip("/")
         current["comfy_url"] = str(current["comfy_url"]).rstrip("/")
         self.settings_path().write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -164,7 +188,11 @@ class Store:
         path = self.project_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(project_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        project = json.loads(path.read_text(encoding="utf-8"))
+        stages = project.setdefault("stages", {})
+        for key in STAGE_IDS:
+            stages.setdefault(key, {"status": "pending", "message": ""})
+        return project
 
     def save_project(self, project: dict) -> dict:
         project["updated_at"] = now_iso()

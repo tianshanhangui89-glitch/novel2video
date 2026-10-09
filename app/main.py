@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from app.checks import check_all
 from app.pipeline import Engine
+from app.rewrite import VARIANTS as REWRITE_VARIANTS
 from app.store import ROOT, STAGE_IDS, VIDEO_WORKFLOWS, Store
 from app.storyboard import StoryboardError, load_example
 
@@ -35,6 +36,11 @@ class SettingsIn(BaseModel):
     aspect: str | None = None
     demo_mode: bool | None = None
     mock_llm: str | None = None
+    rewrite_enabled: bool | None = None
+    rewrite_variant: str | None = None
+    rewrite_model: str | None = None
+    rewrite_adapter: str | None = None
+    rewrite_review: bool | None = None
 
 
 class ProjectIn(BaseModel):
@@ -53,6 +59,7 @@ class RunIn(BaseModel):
 
 class ContinueIn(BaseModel):
     storyboard: dict | None = None
+    prompts: dict[str, str] | None = None
 
 
 def build_app(data_dir: Path | None = None) -> FastAPI:
@@ -91,7 +98,11 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/workflows")
     async def workflows():
-        return {"files": store.list_workflow_files(), "video": list(VIDEO_WORKFLOWS.values())}
+        return {
+            "files": store.list_workflow_files(),
+            "video": list(VIDEO_WORKFLOWS.values()),
+            "rewrite": list(REWRITE_VARIANTS.values()),
+        }
 
     @app.get("/api/sample-chapter")
     async def sample_chapter():
@@ -171,7 +182,8 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
         except FileNotFoundError:
             raise HTTPException(404, "没有找到这个项目") from None
         try:
-            return await engine.continue_run(project_id, (body or ContinueIn()).storyboard)
+            body = body or ContinueIn()
+            return await engine.continue_run(project_id, body.storyboard, body.prompts)
         except StoryboardError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -189,7 +201,7 @@ def build_app(data_dir: Path | None = None) -> FastAPI:
             project = store.load_project(project_id)
         except FileNotFoundError:
             raise HTTPException(404, "没有找到这个项目") from None
-        failed = next((stage for stage in STAGE_IDS if project["stages"][stage]["status"] == "failed"), "stage2")
+        failed = next((stage for stage in STAGE_IDS if project["stages"].get(stage, {}).get("status") == "failed"), "stage2")
         return await engine.start(project_id, from_stage=failed)
 
     @app.get("/api/projects/{project_id}/events")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.comfy import ComfyClient, ComfyError
 from app.ollama import OllamaError, list_models
+from app.rewrite import missing_nodes, variant
 from app.stitch import StitchError, ffmpeg_version
 
 
@@ -11,7 +12,10 @@ async def check_all(settings: dict) -> dict:
     ollama = await _ollama(settings["ollama_url"])
     comfy = await _comfy(settings["comfy_url"])
     ffmpeg = _ffmpeg()
-    return {"ollama": ollama, "comfy": comfy, "ffmpeg": ffmpeg}
+    result = {"ollama": ollama, "comfy": comfy, "ffmpeg": ffmpeg}
+    if settings.get("rewrite_enabled"):
+        result["rewriter"] = await _rewriter(settings, comfy["ok"])
+    return result
 
 
 async def _ollama(url: str) -> dict:
@@ -48,3 +52,19 @@ def _ffmpeg() -> dict:
         return {"ok": True, "detail": ffmpeg_version()}
     except StitchError as exc:
         return {"ok": False, "detail": str(exc)}
+
+
+async def _rewriter(settings: dict, comfy_ok: bool) -> dict:
+    spec = variant(settings.get("rewrite_variant"))
+    if not comfy_ok:
+        return {"ok": False, "detail": f"{spec['label']}：ComfyUI 未连接，改写会退回原始提示词"}
+    info = await ComfyClient(settings["comfy_url"]).object_info()
+    missing = missing_nodes(info, spec, spec["uses_image"])
+    if info is None:
+        return {"ok": False, "detail": "读不到 /object_info，改写会退回原始提示词"}
+    if missing:
+        return {
+            "ok": False,
+            "detail": f"缺少节点 {'、'.join(missing)}。在 ComfyUI Manager 搜索 minimax-h3-prompt-rewriter 安装",
+        }
+    return {"ok": True, "detail": f"{spec['label']} 节点已就绪，显存约 {spec['vram'].lstrip('~')}"}

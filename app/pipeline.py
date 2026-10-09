@@ -10,7 +10,17 @@ import shutil
 from pathlib import Path
 
 from app.comfy import ComfyClient, ComfyError, pick_file
-from app.convert import build_prompt_file, dimensions
+from app.convert import build_prompt_file, dimensions, load_workflow
+from app.rewrite import (
+    H3_WORKFLOWS,
+    build_rewrite_prompt,
+    demo_rewrite,
+    missing_nodes,
+    pick_text,
+    split_fields,
+    uses_image,
+)
+from app.rewrite import variant as rewrite_variant
 from app.demo_media import write_card, write_clip
 from app.ollama import OllamaError, chat_json, choose_model, list_models
 from app.store import STAGE_IDS, VIDEO_WORKFLOWS, Store, now_iso
@@ -94,6 +104,12 @@ class Engine:
             media = self.store.media_dir(project_id)
             if media.exists():
                 shutil.rmtree(media)
+        if start <= STAGE_IDS.index("stage3r") and project.get("storyboard"):
+            for shot in project["storyboard"].get("shots") or []:
+                if shot.get("h3_prompt"):
+                    self._drop_video(project, shot)
+                for key in ("h3_prompt", "h3_prompt_original", "h3_prompt_source", "h3_prompt_note"):
+                    shot.pop(key, None)
         if start <= STAGE_IDS.index("stage5"):
             project["final_video"] = ""
         project["status"] = "running"
@@ -101,8 +117,33 @@ class Engine:
         project["current_label"] = ""
         self.store.save_project(project)
 
-    async def continue_run(self, project_id: str, storyboard: dict | None = None) -> dict:
+    async def continue_run(
+        self,
+        project_id: str,
+        storyboard: dict | None = None,
+        prompts: dict[str, str] | None = None,
+    ) -> dict:
         project = self.store.load_project(project_id)
+        resume_from = "stage4" if project.get("status") == "awaiting_prompt_review" else "stage2"
+        if prompts and project.get("storyboard"):
+            edited = 0
+            for shot in project["storyboard"].get("shots") or []:
+                if shot.get("shot_id") not in prompts:
+                    continue
+                text = str(prompts[shot["shot_id"]] or "").strip()
+                if not text:
+                    text = shot.get("h3_prompt_original") or self._motion_prompt(project, shot)
+                    shot["h3_prompt_source"] = "fallback"
+                elif text != (shot.get("h3_prompt") or "").strip():
+                    shot["h3_prompt_source"] = "manual"
+                    edited += 1
+                if text != (shot.get("h3_prompt") or "").strip():
+                    self._drop_video(project, shot)
+                shot["h3_prompt"] = text
+                shot["h3_prompt_original"] = shot.get("h3_prompt_original") or self._motion_prompt(project, shot)
+            self.store.save_project(project)
+            if edited:
+                self.log(self.store.load_project(project_id), f"手动改了 {edited} 个镜头的 H3 提示词")
         if storyboard:
             project["storyboard"] = normalize_storyboard(
                 storyboard,
@@ -118,10 +159,11 @@ class Engine:
         gate = self.gates.get(project_id)
         task = self.tasks.get(project_id)
         if gate and task and not task.done():
-            self.log(self.store.load_project(project_id), "分镜已确认，继续后续阶段")
+            what = "H3 提示词已确认，开始生成视频" if resume_from == "stage4" else "分镜已确认，继续后续阶段"
+            self.log(self.store.load_project(project_id), what)
             gate.set()
             return self.store.load_project(project_id)
-        return await self.start(project_id, from_stage="stage2")
+        return await self.start(project_id, from_stage=resume_from)
 
     async def cancel(self, project_id: str) -> dict:
         self.cancel_flags[project_id] = True
@@ -145,18 +187,31 @@ class Engine:
         project = self.store.load_project(project_id)
         try:
             start = STAGE_IDS.index(from_stage)
-            if start <= 0:
+
+            def due(stage: str) -> bool:
+                return start <= STAGE_IDS.index(stage)
+
+            if due("stage0"):
                 await self._stage0(project_id)
-            if start <= 1:
+            if due("stage1"):
                 await self._stage1(project_id)
                 await self._wait_approval(project_id)
-            if start <= 2:
+            if due("stage2"):
                 await self._stage2(project_id)
-            if start <= 3:
+            if due("stage3"):
                 await self._stage3(project_id)
-            if start <= 4:
+            if due("stage3r"):
+                rewrote = await self._stage_rewrite(project_id)
+                if rewrote and self.store.load_settings().get("rewrite_review"):
+                    await self._wait_gate(
+                        project_id,
+                        "awaiting_prompt_review",
+                        "等待确认 H3 提示词",
+                        "H3 提示词已改写。可以对照原文逐镜修改，确认后才开始生成视频。",
+                    )
+            if due("stage4"):
                 await self._stage4(project_id)
-            if start <= 5:
+            if due("stage5"):
                 await self._stage5(project_id)
             await self._stage6(project_id)
             project = self.store.load_project(project_id)
@@ -173,19 +228,27 @@ class Engine:
             project["status"] = "failed"
             project["error"] = str(exc)
             project["current_label"] = "失败"
-            failed = next((s for s in STAGE_IDS if project["stages"][s]["status"] == "running"), None)
+            failed = next((s for s in STAGE_IDS if project["stages"].get(s, {}).get("status") == "running"), None)
             if failed:
                 self.set_stage(project, failed, "failed", str(exc)[:240])
             self.log(project, str(exc), "error")
             log.exception("pipeline failed")
 
     async def _wait_approval(self, project_id: str) -> None:
+        await self._wait_gate(
+            project_id,
+            "awaiting_approval",
+            "等待确认分镜",
+            "分镜已生成。可在表格里修改角色、场景、道具和镜头，然后确认继续。",
+        )
+
+    async def _wait_gate(self, project_id: str, status: str, label: str, message: str) -> None:
         gate = asyncio.Event()
         self.gates[project_id] = gate
         project = self.store.load_project(project_id)
-        project["status"] = "awaiting_approval"
-        project["current_label"] = "等待确认分镜"
-        self.log(project, "分镜已生成。可在表格里修改角色、场景、道具和镜头，然后确认继续。")
+        project["status"] = status
+        project["current_label"] = label
+        self.log(project, message)
         while not gate.is_set():
             self._check(project_id)
             try:
@@ -358,6 +421,143 @@ class Engine:
         project = self.store.load_project(project_id)
         self.set_stage(project, "stage3", "done", f"{len(shots)} 张")
 
+    async def _stage_rewrite(self, project_id: str) -> bool:
+        """Rewrite each shot's H3 prompt. Returns True when prompts were produced for review."""
+        project = self.store.load_project(project_id)
+        settings = self.store.load_settings()
+        shots = (project.get("storyboard") or {}).get("shots") or []
+        if not settings.get("rewrite_enabled"):
+            self.set_stage(project, "stage3r", "done", "未启用")
+            return False
+        workflow_id = project.get("video_workflow") or "h3_i2v"
+        if workflow_id not in H3_WORKFLOWS:
+            self.log(project, "视频分支不是 MiniMax H3，跳过 H3 提示词改写")
+            self.set_stage(project, "stage3r", "done", "非 H3 分支，跳过")
+            return False
+        spec = rewrite_variant(settings.get("rewrite_variant"))
+        with_image = uses_image(spec, workflow_id)
+        demo = bool(settings.get("demo_mode"))
+        self.set_stage(project, "stage3r", "running", spec["label"])
+        if workflow_id == "h3_r2v" and spec["uses_image"]:
+            self.log(project, "参考生视频分支没有首帧，Rewriter 8B 按 T2VA 只读文字")
+
+        info: dict | None = None
+        blocked = ""
+        if not demo:
+            info = await ComfyClient(settings["comfy_url"]).object_info()
+            missing = missing_nodes(info, spec, with_image)
+            if info is None:
+                blocked = "读不到 ComfyUI /object_info"
+            elif missing:
+                blocked = "ComfyUI 缺少节点 " + "、".join(missing) + "（请安装 minimax-h3-prompt-rewriter）"
+            if blocked:
+                project = self.store.load_project(project_id)
+                self.log(project, f"{blocked}，所有镜头沿用原始提示词", "warning")
+
+        rewritten = 0
+        for index, shot in enumerate(shots, start=1):
+            self._check(project_id)
+            project = self.store.load_project(project_id)
+            original = self._motion_prompt(project, shot)
+            sid = shot["shot_id"]
+            if shot.get("h3_prompt") and shot.get("h3_prompt_original") == original:
+                self.log(project, f"镜头 {sid} 已有 H3 提示词，跳过")
+                rewritten += shot.get("h3_prompt_source") not in {"fallback", ""}
+                continue
+            project["current_label"] = f"镜头 {sid} · H3 提示词"
+            self.set_stage(project, "stage3r", "running", f"{index}/{len(shots)} · {spec['label']}")
+            duration = float(shot.get("duration_sec") or 5)
+            key_path = self.store.media_dir(project_id) / (shot.get("keyframe") or f"shots/{sid}_key.png")
+            image = key_path if with_image and key_path.is_file() else None
+            note = ""
+            if demo:
+                await asyncio.sleep(0.15)
+                text, source = demo_rewrite(original, shot, project.get("aspect") or "16:9", duration, image is not None), "demo"
+                self.log(self.store.load_project(project_id), f"演示模式模拟改写镜头 {sid}")
+            elif blocked:
+                text, source, note = original, "fallback", blocked
+            else:
+                try:
+                    text = await self._comfy_rewrite(project_id, spec, shot, original, duration, image, info, settings)
+                    source = "rewriter"
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    if self.cancel_flags.get(project_id):
+                        raise Cancelled("已停止") from exc
+                    text, source, note = original, "fallback", str(exc)[:300]
+                    self.log(self.store.load_project(project_id), f"镜头 {sid} 改写失败，沿用原始提示词：{exc}", "warning")
+            if source != "fallback":
+                rewritten += 1
+            project = self.store.load_project(project_id)
+            for item in project["storyboard"].get("shots") or []:
+                if item.get("shot_id") == sid:
+                    item["h3_prompt_original"] = original
+                    item["h3_prompt"] = text
+                    item["h3_prompt_source"] = source
+                    item["h3_prompt_note"] = note
+            self.publish(project)
+        project = self.store.load_project(project_id)
+        self.set_stage(project, "stage3r", "done", f"{rewritten}/{len(shots)} 已改写")
+        return rewritten > 0
+
+    async def _comfy_rewrite(self, project_id, spec, shot, original, duration, image, info, settings) -> str:
+        project = self.store.load_project(project_id)
+        client = ComfyClient(settings["comfy_url"])
+        uploaded = await client.upload_image(image) if image else None
+        try:
+            workflow = load_workflow(self.store.workflow_path(spec["file"]))
+        except FileNotFoundError as exc:
+            raise ComfyError(str(exc)) from exc
+        graph, notes = build_rewrite_prompt(
+            workflow,
+            spec=spec,
+            prompt=self._rewrite_input(project, shot, original),
+            aspect=project.get("aspect") or "16:9",
+            duration=duration,
+            seed=random.randint(1, 2**31),
+            image=uploaded,
+            model=settings.get("rewrite_model") or "",
+            adapter=(settings.get("rewrite_adapter") or "") if spec["uses_adapter"] else "",
+            object_info=info,
+        )
+        for note in notes:
+            self.log(self.store.load_project(project_id), note, "warning")
+        mode = "I2VA，带关键帧" if uploaded else "T2VA"
+        self.log(project, f"镜头 {shot['shot_id']} 提交 {spec['file']}（{mode}，{duration:g} 秒）")
+
+        def logger(message: str) -> None:
+            self.log(self.store.load_project(project_id), message)
+
+        outputs = await client.queue_and_wait_outputs(
+            graph,
+            logger,
+            should_stop=lambda: bool(self.cancel_flags.get(project_id)),
+        )
+        text = pick_text(outputs)
+        if not text:
+            raise ComfyError("改写节点没有返回文本")
+        if not any(split_fields(text).values()):
+            self.log(self.store.load_project(project_id), f"镜头 {shot['shot_id']} 的改写没有三段标签，仍然使用", "warning")
+        return text
+
+    def _rewrite_input(self, project: dict, shot: dict, original: str) -> str:
+        beats = [shot.get("camera"), shot.get("action")]
+        context = "; ".join(str(b).strip() for b in beats if b and str(b).strip())
+        return f"{original} Shot context: {context}." if context else original
+
+    def _video_prompt(self, project: dict, shot: dict) -> str:
+        original = self._motion_prompt(project, shot)
+        settings = self.store.load_settings()
+        if (
+            settings.get("rewrite_enabled")
+            and project.get("video_workflow") in H3_WORKFLOWS
+            and shot.get("h3_prompt")
+            and shot.get("h3_prompt_original") == original
+        ):
+            return shot["h3_prompt"]
+        return original
+
     async def _stage4(self, project_id: str) -> None:
         project = self.store.load_project(project_id)
         shots = (project.get("storyboard") or {}).get("shots") or []
@@ -388,7 +588,7 @@ class Engine:
             await self._render_video(
                 project_id,
                 workflow_name=spec["file"],
-                prompt=self._motion_prompt(project, shot),
+                prompt=self._video_prompt(project, shot),
                 images=images,
                 dest_rel=rel,
                 prefix=f"n2v/{project_id}/shot_{shot['shot_id']}",
@@ -569,6 +769,15 @@ class Engine:
             raise ComfyError("ComfyUI 完成了，但没有返回图片或视频文件")
         await client.download(chosen, dest)
         self.log(self.store.load_project(project_id), f"已保存 {dest.relative_to(self.store.media_dir(project_id))}")
+
+    def _drop_video(self, project: dict, shot: dict) -> None:
+        rel = shot.get("video") or f"shots/{shot.get('shot_id')}.mp4"
+        path = self.store.media_dir(project["id"]) / rel
+        if path.is_file():
+            path.unlink()
+        shot["video"] = ""
+        if shot.get("status") == "video":
+            shot["status"] = "keyframe"
 
     def _exists(self, project_id: str, rel: str) -> bool:
         return bool(rel) and (self.store.media_dir(project_id) / rel).is_file()
